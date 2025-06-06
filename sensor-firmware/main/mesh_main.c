@@ -409,13 +409,14 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
     ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
     
-    /* 🆕 SENSOR: Configure as non-root node that can only join existing mesh networks
-     * - Do NOT fix root - sensors should never be root nodes
-     * - Enable self-organization to allow joining existing mesh networks
-     * - Only the gateway (with esp_mesh_fix_root(true)) should be the root
+    /* 🆕 SENSOR: Configure as non-root node for standalone mesh joining
+     * - Fix root: false (sensors must NOT be root nodes)
+     * - Self-organized: true (can scan and join existing mesh networks)
+     * - Will search for and join gateway's standalone mesh
      */
-    ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, false));
-    ESP_LOGI(MESH_TAG, "SENSOR: Non-root mode - will search for and join gateway's mesh network");
+    ESP_ERROR_CHECK(esp_mesh_fix_root(false));
+    ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, true));
+    ESP_LOGI(MESH_TAG, "SENSOR: Configured as mesh joiner - will search for gateway's standalone mesh");
     
 #ifdef CONFIG_MESH_ENABLE_PS
     /* Enable mesh PS function */

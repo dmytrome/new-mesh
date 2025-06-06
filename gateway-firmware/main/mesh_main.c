@@ -419,13 +419,15 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
     ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
     
-    /* 🆕 GATEWAY: Fix as designated root node
-     * - Only the gateway should connect to router and become root
-     * - Prevents sensors from becoming competing root nodes
+    /* 🆕 GATEWAY: Configure as standalone fixed root for router-independent mesh
+     * - Fixed root: true (this device will be the root)
+     * - Self-organized: false (prevents root node election, maintains fixed root)
+     * - No router dependency: mesh forms independently
      */
     ESP_ERROR_CHECK(esp_mesh_fix_root(true));
-    ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, false));
-    ESP_LOGI(MESH_TAG, "GATEWAY: Fixed as root node - will be the only router connection point");
+    ESP_ERROR_CHECK(esp_mesh_set_self_organized(false, false));
+    ESP_LOGI(MESH_TAG, "GATEWAY: Configured as standalone fixed root - no router dependency");
+    
 #ifdef CONFIG_MESH_ENABLE_PS
     /* Enable mesh PS function */
     ESP_ERROR_CHECK(esp_mesh_enable_ps());
@@ -441,12 +443,19 @@ void app_main(void)
     mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
     /* mesh ID */
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
-    /* router */
+    /* channel (must match the router's channel) */
     cfg.channel = CONFIG_MESH_CHANNEL;
-    cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
-    memcpy((uint8_t *) &cfg.router.ssid, CONFIG_MESH_ROUTER_SSID, cfg.router.ssid_len);
-    memcpy((uint8_t *) &cfg.router.password, CONFIG_MESH_ROUTER_PASSWD,
-           strlen(CONFIG_MESH_ROUTER_PASSWD));
+    
+    /* 🆕 GATEWAY: Remove router configuration for standalone mesh
+     * - No router SSID/password: creates independent mesh network
+     * - Gateway becomes root without external WiFi dependency
+     * - Perfect for GPRS-enabled field deployment
+     */
+    cfg.router.ssid_len = 0;
+    memset((uint8_t *) &cfg.router.ssid, 0, sizeof(cfg.router.ssid));
+    memset((uint8_t *) &cfg.router.password, 0, sizeof(cfg.router.password));
+    memset((uint8_t *) &cfg.router.bssid, 0, sizeof(cfg.router.bssid));
+    
     /* mesh softAP */
     ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
     cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;

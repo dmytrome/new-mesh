@@ -1,11 +1,3 @@
-/* Mesh Internal Communication Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <string.h>
 #include <inttypes.h>
 #include "esp_wifi.h"
@@ -15,7 +7,6 @@
 #include "esp_mesh.h"
 #include "esp_mesh_internal.h"
 #include "esp_sleep.h"
-#include "mesh_light.h"
 #include "nvs_flash.h"
 
 /*******************************************************
@@ -45,7 +36,6 @@ typedef struct {
  *                Variable Definitions
  *******************************************************/
 static const char *MESH_TAG = "mesh_main";
-static uint8_t tx_buf[TX_SIZE] = { 0, };
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static bool is_running = true;
 static bool is_mesh_connected = false;
@@ -53,43 +43,18 @@ static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
 
-mesh_light_ctl_t light_on = {
-    .cmd = MESH_CONTROL_CMD,
-    .on = 1,
-    .token_id = MESH_TOKEN_ID,
-    .token_value = MESH_TOKEN_VALUE,
-};
-
-mesh_light_ctl_t light_off = {
-    .cmd = MESH_CONTROL_CMD,
-    .on = 0,
-    .token_id = MESH_TOKEN_ID,
-    .token_value = MESH_TOKEN_VALUE,
-};
-
-/*******************************************************
- *                Function Declarations
- *******************************************************/
-
 /*******************************************************
  *                Function Definitions
  *******************************************************/
 void esp_mesh_p2p_tx_main(void *arg)
 {
-    int i;
-    esp_err_t err;
     int send_count = 0;
     mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
     int route_table_size = 0;
-    mesh_data_t data;
-    data.data = tx_buf;
-    data.size = sizeof(tx_buf);
-    data.proto = MESH_PROTO_BIN;
-    data.tos = MESH_TOS_P2P;
     is_running = true;
 
     while (is_running) {
-        /* non-root do nothing but print */
+        /* Gateway: Check routing table and log sensor network status */
         if (!esp_mesh_is_root()) {
             ESP_LOGI(MESH_TAG, "layer:%d, rtableSize:%d, %s", mesh_layer,
                      esp_mesh_get_routing_table_size(),
@@ -97,48 +62,17 @@ void esp_mesh_p2p_tx_main(void *arg)
             vTaskDelay(10 * 1000 / portTICK_PERIOD_MS);
             continue;
         }
+        
         esp_mesh_get_routing_table((mesh_addr_t *) &route_table,
                                    CONFIG_MESH_ROUTE_TABLE_SIZE * 6, &route_table_size);
-        if (send_count && !(send_count % 100)) {
-            ESP_LOGI(MESH_TAG, "size:%d/%d,send_count:%d", route_table_size,
-                     esp_mesh_get_routing_table_size(), send_count);
-        }
         send_count++;
-        tx_buf[25] = (send_count >> 24) & 0xff;
-        tx_buf[24] = (send_count >> 16) & 0xff;
-        tx_buf[23] = (send_count >> 8) & 0xff;
-        tx_buf[22] = (send_count >> 0) & 0xff;
-        if (send_count % 2) {
-            memcpy(tx_buf, (uint8_t *)&light_on, sizeof(light_on));
-        } else {
-            memcpy(tx_buf, (uint8_t *)&light_off, sizeof(light_off));
-        }
-
-        for (i = 0; i < route_table_size; i++) {
-            err = esp_mesh_send(&route_table[i], &data, MESH_DATA_P2P, NULL, 0);
-            if (err) {
-                ESP_LOGE(MESH_TAG,
-                         "[ROOT-2-UNICAST:%d][L:%d]parent:"MACSTR" to "MACSTR", heap:%" PRId32 "[err:0x%x, proto:%d, tos:%d]",
-                         send_count, mesh_layer, MAC2STR(mesh_parent_addr.addr),
-                         MAC2STR(route_table[i].addr), esp_get_minimum_free_heap_size(),
-                         err, data.proto, data.tos);
-            } else if (!(send_count % 100)) {
-                ESP_LOGW(MESH_TAG,
-                         "[ROOT-2-UNICAST:%d][L:%d][rtableSize:%d]parent:"MACSTR" to "MACSTR", heap:%" PRId32 "[err:0x%x, proto:%d, tos:%d]",
-                         send_count, mesh_layer,
-                         esp_mesh_get_routing_table_size(),
-                         MAC2STR(mesh_parent_addr.addr),
-                         MAC2STR(route_table[i].addr), esp_get_minimum_free_heap_size(),
-                         err, data.proto, data.tos);
-            }
-        }
-        /* if route_table_size is less than 10, add delay to avoid watchdog in this task. */
-        if (route_table_size < 10) {
-            vTaskDelay(1 * 1000 / portTICK_PERIOD_MS);
+        
+        if (!(send_count % 10)) {
+            ESP_LOGI(MESH_TAG, "GATEWAY STATUS: Connected sensors:%d/%d, cycle:%d", 
+                     route_table_size, esp_mesh_get_routing_table_size(), send_count);
         }
         
-        // 🆕 GATEWAY: Much longer delay for ultra-low power testing
-        // Only send test data every 30 seconds instead of continuous flooding
+        // Gateway doesn't need to send test data frequently - focus on receiving sensor data
         vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
     }
     vTaskDelete(NULL);
@@ -182,9 +116,6 @@ void esp_mesh_p2p_rx_main(void *arg)
             send_count = (data.data[25] << 24) | (data.data[24] << 16)
                          | (data.data[23] << 8) | data.data[22];
         }
-        
-        /* process light control */
-        mesh_light_process(&from, data.data, data.size);
         
         // Log regular messages (less frequently to avoid spam)
         if (!(recv_count % 10)) {
@@ -289,7 +220,6 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  esp_mesh_is_root() ? "<ROOT>" :
                  (mesh_layer == 2) ? "<layer2>" : "", MAC2STR(id.addr), connected->duty);
         last_layer = mesh_layer;
-        mesh_connected_indicator(mesh_layer);
         is_mesh_connected = true;
         if (esp_mesh_is_root()) {
             esp_netif_dhcpc_stop(netif_sta);
@@ -304,7 +234,6 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  "<MESH_EVENT_PARENT_DISCONNECTED>reason:%d",
                  disconnected->reason);
         is_mesh_connected = false;
-        mesh_disconnected_indicator();
         mesh_layer = esp_mesh_get_layer();
     }
     break;
@@ -316,7 +245,6 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  esp_mesh_is_root() ? "<ROOT>" :
                  (mesh_layer == 2) ? "<layer2>" : "");
         last_layer = mesh_layer;
-        mesh_connected_indicator(mesh_layer);
     }
     break;
     case MESH_EVENT_ROOT_ADDRESS: {
@@ -427,7 +355,6 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
 
 void app_main(void)
 {
-    ESP_ERROR_CHECK(mesh_light_init());
     ESP_ERROR_CHECK(nvs_flash_init());
     /* tcpip initialization */
     ESP_ERROR_CHECK(esp_netif_init());

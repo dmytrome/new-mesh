@@ -1,11 +1,3 @@
-/* Mesh Internal Communication Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <string.h>
 #include <inttypes.h>
 #include "esp_wifi.h"
@@ -16,30 +8,62 @@
 #include "esp_mesh_internal.h"
 #include "mesh_light.h"
 #include "nvs_flash.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
 
 /*******************************************************
- *                Macros
+ *                Constants & Macros
  *******************************************************/
+static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 
-/*******************************************************
- *                Constants
- *******************************************************/
+// Ultra-Low Power Coordination Constants
+#define DATA_COLLECTION_WINDOW_SEC    60    // 60 seconds for all data collection
+#define MESH_CONNECTION_TIMEOUT_SEC   10    // 10 seconds to connect to mesh
+#define SENSOR_READ_TIMEOUT_SEC       5     // 5 seconds to read all sensors
+#define DATA_SEND_TIMEOUT_SEC         10    // 10 seconds to send data
+#define EMERGENCY_SLEEP_SEC           300   // 5 minutes emergency sleep
+
+// Communication Constants
 #define RX_SIZE          (1500)
 #define TX_SIZE          (1460)
 
 /*******************************************************
- *                Variable Definitions
+ *                Type Definitions
+ *******************************************************/
+// Coordinated operation states
+typedef enum {
+    COORD_STATE_WAKE_UP,
+    COORD_STATE_WAIT_TIME_SYNC,
+    COORD_STATE_CONNECT_MESH,
+    COORD_STATE_COLLECT_DATA,
+    COORD_STATE_SEND_DATA,
+    COORD_STATE_PREPARE_SLEEP,
+    COORD_STATE_DEEP_SLEEP
+} coordinated_state_t;
+
+/*******************************************************
+ *                Global Variables
  *******************************************************/
 static const char *MESH_TAG = "mesh_main";
-static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
+
+// Communication buffers
 static uint8_t tx_buf[TX_SIZE] = { 0, };
 static uint8_t rx_buf[RX_SIZE] = { 0, };
+
+// Mesh state variables
 static bool is_running = true;
 static bool is_mesh_connected = false;
 static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
 
+// Coordination variables
+static coordinated_state_t current_state = COORD_STATE_WAKE_UP;
+static bool time_synchronized = false;
+static bool data_collection_done = false;
+static uint32_t wake_start_time = 0;
+
+// Light control structures
 mesh_light_ctl_t light_on = {
     .cmd = MESH_CONTROL_CMD,
     .on = 1,
@@ -55,8 +79,278 @@ mesh_light_ctl_t light_off = {
 };
 
 /*******************************************************
- *                Function Definitions
+ *                Message Types
  *******************************************************/
+typedef struct {
+    uint8_t msg_type;           // Message type identifier
+    uint8_t mac_addr[6];        // MAC address
+    uint8_t layer;              // Mesh layer
+    uint32_t timestamp;         // Timestamp
+} sensor_mac_msg_t;
+
+#define MSG_TYPE_SENSOR_MAC 0x01
+
+/*******************************************************
+ *                Function Declarations
+ *******************************************************/
+void mesh_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+
+/*******************************************************
+ *                Common Initialization Functions
+ *******************************************************/
+static esp_err_t init_wifi_and_netif(void)
+{
+    ESP_LOGI(MESH_TAG, "Initializing WiFi and network interfaces...");
+    
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
+    
+    wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&config));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    return ESP_OK;
+}
+
+static esp_err_t init_mesh_base(void)
+{
+    ESP_LOGI(MESH_TAG, "Initializing mesh base configuration...");
+    
+    ESP_ERROR_CHECK(esp_mesh_init());
+    ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
+    
+    ESP_ERROR_CHECK(esp_mesh_set_topology(CONFIG_MESH_TOPOLOGY));
+    ESP_ERROR_CHECK(esp_mesh_set_max_layer(CONFIG_MESH_MAX_LAYER));
+    ESP_ERROR_CHECK(esp_mesh_fix_root(false));
+    ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, false));
+    
+    return ESP_OK;
+}
+
+static esp_err_t configure_and_start_mesh(void)
+{
+    ESP_LOGI(MESH_TAG, "Configuring and starting mesh...");
+    
+    mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
+    
+    // Mesh ID and channel
+    memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
+    cfg.channel = CONFIG_MESH_CHANNEL;
+    
+    // Router-less mesh: Provide minimal valid router credentials for validation
+    // These credentials satisfy ESP-IDF validation but won't be used in router-less operation
+    strcpy((char*)cfg.router.ssid, "dummy");
+    cfg.router.ssid_len = strlen("dummy");
+    strcpy((char*)cfg.router.password, "dummy_password");
+    memset(cfg.router.bssid, 0, sizeof(cfg.router.bssid));
+    
+    // Mesh AP configuration
+    memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD, strlen(CONFIG_MESH_AP_PASSWD));
+    cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
+    cfg.mesh_ap.nonmesh_max_connection = CONFIG_MESH_NON_MESH_AP_CONNECTIONS;
+    
+    ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
+    ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
+    ESP_ERROR_CHECK(esp_mesh_start());
+    
+    return ESP_OK;
+}
+
+static esp_err_t init_full_mesh_system(bool is_fast_init)
+{
+    ESP_LOGI(MESH_TAG, "Initializing %s mesh system...", is_fast_init ? "fast" : "full");
+    
+    // Initialize WiFi and network interfaces
+    ESP_ERROR_CHECK(init_wifi_and_netif());
+    
+    // Register IP event handler for normal operation
+    if (!is_fast_init) {
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
+    }
+    
+    // Initialize mesh base configuration
+    ESP_ERROR_CHECK(init_mesh_base());
+    
+    // Additional configuration for normal operation
+    if (!is_fast_init) {
+        ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
+        ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
+        
+#ifdef CONFIG_MESH_ENABLE_PS
+        ESP_ERROR_CHECK(esp_mesh_enable_ps());
+        ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
+#else
+        ESP_ERROR_CHECK(esp_mesh_disable_ps());
+        ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
+#endif
+    }
+    
+    // Configure and start mesh
+    ESP_ERROR_CHECK(configure_and_start_mesh());
+    
+    return ESP_OK;
+}
+
+/*******************************************************
+ *                Ultra-Low Power Functions
+ *******************************************************/
+static esp_err_t check_wake_timeout(void)
+{
+    uint32_t current_time = esp_timer_get_time() / 1000000; // Convert to seconds
+    uint32_t elapsed = current_time - wake_start_time;
+    
+    if (elapsed > DATA_COLLECTION_WINDOW_SEC) {
+        ESP_LOGW(MESH_TAG, "⚠️ Data collection timeout (%lu sec) - entering emergency sleep", elapsed);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t wait_for_time_sync_signal(uint32_t timeout_ms)
+{
+    // TODO: Implement time sync reception from gateway
+    // For now, simulate immediate sync for basic operation
+    ESP_LOGI(MESH_TAG, "⏰ Simulating time sync (TODO: implement real time sync)");
+    vTaskDelay(1000 / portTICK_PERIOD_MS); // Simulate sync delay
+    return ESP_OK;
+}
+
+static esp_err_t read_and_send_sensor_data_quick(void)
+{
+    ESP_LOGI(MESH_TAG, "📊 Reading sensor data quickly...");
+    
+    // TODO: Replace with actual sensor reading
+    // For now, simulate sensor data
+    uint8_t sensor_data[32];
+    memset(sensor_data, 0xAA, sizeof(sensor_data)); // Dummy data
+    
+    // TODO: Send data via mesh efficiently
+    ESP_LOGI(MESH_TAG, "📤 Sensor data collected and ready to send");
+    
+    return ESP_OK;
+}
+
+static void enter_coordinated_deep_sleep(uint32_t sleep_duration_sec)
+{
+    ESP_LOGI(MESH_TAG, "💤 Entering coordinated deep sleep for %lu seconds", sleep_duration_sec);
+    
+    // Configure wake-up timer
+    esp_sleep_enable_timer_wakeup(sleep_duration_sec * 1000000ULL); // Convert to microseconds
+    
+    // Enter deep sleep
+    esp_deep_sleep_start();
+}
+
+static esp_err_t coordinated_sensor_cycle(void)
+{
+    ESP_LOGI(MESH_TAG, "🔋 Starting coordinated ultra-low power cycle");
+    wake_start_time = esp_timer_get_time() / 1000000;
+    
+    // Phase 1: Wait for time synchronization (with timeout)
+    current_state = COORD_STATE_WAIT_TIME_SYNC;
+    if (wait_for_time_sync_signal(5000) == ESP_OK) {
+        time_synchronized = true;
+        ESP_LOGI(MESH_TAG, "✅ Time synchronized with gateway");
+    } else {
+        ESP_LOGW(MESH_TAG, "⚠️ Time sync timeout - proceeding anyway");
+    }
+    
+    // Phase 2: Quick mesh connection (with timeout)
+    current_state = COORD_STATE_CONNECT_MESH;
+    uint32_t mesh_wait_start = esp_timer_get_time() / 1000;
+    while (!is_mesh_connected && (esp_timer_get_time() / 1000 - mesh_wait_start) < (MESH_CONNECTION_TIMEOUT_SEC * 1000)) {
+        if (check_wake_timeout() != ESP_OK) {
+            enter_coordinated_deep_sleep(EMERGENCY_SLEEP_SEC);
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+    
+    if (is_mesh_connected) {
+        ESP_LOGI(MESH_TAG, "✅ Mesh connected quickly");
+        
+        // Phase 3: Read and send sensor data
+        current_state = COORD_STATE_COLLECT_DATA;
+        if (read_and_send_sensor_data_quick() == ESP_OK) {
+            data_collection_done = true;
+            ESP_LOGI(MESH_TAG, "✅ Sensor data collection complete");
+        }
+    } else {
+        ESP_LOGW(MESH_TAG, "⚠️ Mesh connection failed - emergency sleep");
+    }
+    
+    // Phase 4: Prepare for coordinated sleep
+    current_state = COORD_STATE_PREPARE_SLEEP;
+    ESP_LOGI(MESH_TAG, "🔄 Coordinated cycle complete - preparing for sleep");
+    
+    // Calculate next wake time (TODO: get from gateway time sync)
+    uint32_t next_sleep_duration = 300; // 5 minutes default
+    
+    // Enter coordinated deep sleep
+    current_state = COORD_STATE_DEEP_SLEEP;
+    enter_coordinated_deep_sleep(next_sleep_duration);
+    
+    return ESP_OK;
+}
+
+/*******************************************************
+ *                Communication Functions
+ *******************************************************/
+void esp_mesh_sensor_mac_tx_main(void *arg)
+{
+    esp_err_t err;
+    mesh_addr_t gateway_addr;
+    mesh_data_t data;
+    sensor_mac_msg_t mac_msg;
+    uint8_t mac[6];
+    
+    // Get our MAC address
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    
+    // Prepare MAC message
+    mac_msg.msg_type = MSG_TYPE_SENSOR_MAC;
+    memcpy(mac_msg.mac_addr, mac, 6);
+    mac_msg.layer = 0; // Will be updated when we know our layer
+    mac_msg.timestamp = 0; // Will be updated each send
+    
+    data.data = (uint8_t*)&mac_msg;
+    data.size = sizeof(mac_msg);
+    data.proto = MESH_PROTO_BIN;
+    data.tos = MESH_TOS_P2P;
+    
+    // Gateway address (root address)
+    memset(&gateway_addr, 0, sizeof(gateway_addr));
+    
+    ESP_LOGI(MESH_TAG, "📡 Sensor MAC TX task started - MAC: "MACSTR"", MAC2STR(mac));
+    
+    while (is_running) {
+        // Only send if we're connected to mesh
+        if (is_mesh_connected && !esp_mesh_is_root()) {
+            // Update current info
+            mac_msg.layer = mesh_layer;
+            mac_msg.timestamp = esp_timer_get_time() / 1000000; // seconds
+            
+            // Send to root (gateway)
+            err = esp_mesh_send(&gateway_addr, &data, MESH_DATA_P2P, NULL, 0);
+            if (err == ESP_OK) {
+                ESP_LOGI(MESH_TAG, "📤 Sent MAC to gateway: "MACSTR" (Layer %d)", 
+                         MAC2STR(mac), mac_msg.layer);
+            } else {
+                ESP_LOGW(MESH_TAG, "❌ Failed to send MAC to gateway: 0x%x", err);
+            }
+        } else {
+            ESP_LOGD(MESH_TAG, "⏳ Waiting for mesh connection before sending MAC...");
+        }
+        
+        // Send every 10 seconds
+        vTaskDelay(10 * 1000 / portTICK_PERIOD_MS);
+    }
+    vTaskDelete(NULL);
+}
+
 void esp_mesh_p2p_tx_main(void *arg)
 {
     int i;
@@ -168,13 +462,17 @@ esp_err_t esp_mesh_comm_p2p_start(void)
     if (!is_comm_p2p_started) {
         is_comm_p2p_started = true;
         
-        // Sensor: Only RX for power saving (no unnecessary TX task)
+        // Sensor: Enable RX and MAC TX for communication testing
         xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL);
-        ESP_LOGI(MESH_TAG, "SENSOR: P2P RX enabled (TX disabled for power saving)");
+        xTaskCreate(esp_mesh_sensor_mac_tx_main, "SENSOR_MAC_TX", 3072, NULL, 5, NULL);
+        ESP_LOGI(MESH_TAG, "SENSOR: P2P RX enabled + MAC TX enabled for testing");
     }
     return ESP_OK;
 }
 
+/*******************************************************
+ *                Event Handlers
+ *******************************************************/
 void mesh_event_handler(void *arg, esp_event_base_t event_base,
                         int32_t event_id, void *event_data)
 {
@@ -380,92 +678,47 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
 {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(MESH_TAG, "<IP_EVENT_STA_GOT_IP>IP:" IPSTR, IP2STR(&event->ip_info.ip));
-
 }
 
+/*******************************************************
+ *                Main Application
+ *******************************************************/
 void app_main(void)
 {
     ESP_ERROR_CHECK(mesh_light_init());
     ESP_ERROR_CHECK(nvs_flash_init());
-    /*  tcpip initialization */
-    ESP_ERROR_CHECK(esp_netif_init());
-    /*  event initialization */
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    /*  create network interfaces for mesh (only station instance saved for further manipulation, soft AP instance ignored */
-    ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
-    /*  wifi initialization */
-    wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&config));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    /*  mesh initialization */
-    ESP_ERROR_CHECK(esp_mesh_init());
-    ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
-    /*  set mesh topology */
-    ESP_ERROR_CHECK(esp_mesh_set_topology(CONFIG_MESH_TOPOLOGY));
-    /*  set mesh max layer according to the topology */
-    ESP_ERROR_CHECK(esp_mesh_set_max_layer(CONFIG_MESH_MAX_LAYER));
-    ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
-    ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
     
-    /* 🆕 SENSOR: Configure as non-root node for standalone mesh joining
-     * - Fix root: false (sensors must NOT be root nodes)
-     * - Self-organized: true (can scan and join existing mesh networks)
-     * - Will search for and join gateway's standalone mesh
-     */
-    ESP_ERROR_CHECK(esp_mesh_fix_root(false));
-    ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, true));
-    ESP_LOGI(MESH_TAG, "SENSOR: Configured as mesh joiner - will search for gateway's standalone mesh");
+    // Check wake-up reason for ultra-low power coordination
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    bool is_coordinated_wake = (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER);
     
-#ifdef CONFIG_MESH_ENABLE_PS
-    /* Enable mesh PS function */
-    ESP_ERROR_CHECK(esp_mesh_enable_ps());
-    /* better to increase the associate expired time, if a small duty cycle is set. */
-    ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
-    /* better to increase the announce interval to avoid too much management traffic, if a small duty cycle is set. */
-    ESP_ERROR_CHECK(esp_mesh_set_announce_interval(600, 3300));
-#else
-    /* Disable mesh PS function */
-    ESP_ERROR_CHECK(esp_mesh_disable_ps());
-    ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
-#endif
-    /* Enable the Mesh IE encryption by default */
-    mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
-    /* mesh ID */
-    memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
-    /* channel (must match the router's channel) */
-    cfg.channel = CONFIG_MESH_CHANNEL;
+    if (is_coordinated_wake) {
+        ESP_LOGI(MESH_TAG, "⏰ Coordinated wake-up detected - entering ultra-low power mode");
+        
+        // Fast initialization for coordinated operation
+        ESP_ERROR_CHECK(init_full_mesh_system(true));
+        
+        // Execute coordinated ultra-low power cycle
+        coordinated_sensor_cycle();
+        
+        // Should not reach here (will deep sleep)
+        ESP_LOGW(MESH_TAG, "⚠️ Coordinated cycle returned unexpectedly");
+        return;
+    }
     
-    /* For sensor nodes: Remove router credentials to prevent direct router connections
-     * Sensors should only join existing mesh networks created by the gateway */
-    cfg.router.ssid_len = 0;
-    memset((uint8_t *) &cfg.router.ssid, 0, sizeof(cfg.router.ssid));
-    memset((uint8_t *) &cfg.router.password, 0, sizeof(cfg.router.password));
-    memset((uint8_t *) &cfg.router.bssid, 0, sizeof(cfg.router.bssid));
+    // Normal initialization for standard operation or first boot
+    ESP_LOGI(MESH_TAG, "🔄 Normal boot - initializing standard mesh operation");
     
-    /* mesh softAP */
-    ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
-    cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
-    cfg.mesh_ap.nonmesh_max_connection = CONFIG_MESH_NON_MESH_AP_CONNECTIONS;
-    memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD,
-           strlen(CONFIG_MESH_AP_PASSWD));
-    ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
+    // Full initialization for normal operation
+    ESP_ERROR_CHECK(init_full_mesh_system(false));
 
-    /*
-     * Sensors start as MESH_IDLE by default and will automatically join the mesh network
-     * created by the gateway (root node). No need to explicitly set device type.
-     */
-    /* mesh start */
-    ESP_ERROR_CHECK(esp_mesh_start());
-    
-#ifdef CONFIG_MESH_ENABLE_PS
-    /* set the device active duty cycle. (default:10, MESH_PS_DEVICE_DUTY_REQUEST) */
-    ESP_ERROR_CHECK(esp_mesh_set_active_duty_cycle(CONFIG_MESH_PS_DEV_DUTY, CONFIG_MESH_PS_DEV_DUTY_TYPE));
-    /* set the network active duty cycle. (default:10, -1, MESH_PS_NETWORK_DUTY_APPLIED_ENTIRE) */
-    ESP_ERROR_CHECK(esp_mesh_set_network_duty_cycle(CONFIG_MESH_PS_NWK_DUTY, CONFIG_MESH_PS_NWK_DUTY_DURATION, CONFIG_MESH_PS_NWK_DUTY_RULE));
-#endif
-    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  esp_get_minimum_free_heap_size(),
+    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  
+             esp_get_minimum_free_heap_size(),
              esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
-             esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", esp_mesh_is_ps_enabled());
+             esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", 
+             esp_mesh_is_ps_enabled());
+             
+    // Provide hints for ultra-low power mode
+    ESP_LOGI(MESH_TAG, "💡 Hint: To enable ultra-low power mode, trigger a timer wake-up");
+    ESP_LOGI(MESH_TAG, "🔄 Running in standard continuous mode for now");
 }

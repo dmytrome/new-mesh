@@ -21,6 +21,19 @@
 /*******************************************************
  *                Macros
  *******************************************************/
+static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
+
+/*******************************************************
+ *                Message Types
+ *******************************************************/
+typedef struct {
+    uint8_t msg_type;           // Message type identifier
+    uint8_t mac_addr[6];        // MAC address
+    uint8_t layer;              // Mesh layer
+    uint32_t timestamp;         // Timestamp
+} sensor_mac_msg_t;
+
+#define MSG_TYPE_SENSOR_MAC 0x01
 
 /*******************************************************
  *                Constants
@@ -32,7 +45,6 @@
  *                Variable Definitions
  *******************************************************/
 static const char *MESH_TAG = "mesh_main";
-static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 static uint8_t tx_buf[TX_SIZE] = { 0, };
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static bool is_running = true;
@@ -151,15 +163,31 @@ void esp_mesh_p2p_rx_main(void *arg)
             ESP_LOGE(MESH_TAG, "err:0x%x, size:%d", err, data.size);
             continue;
         }
-        /* extract send count */
+        
+        recv_count++;
+        
+        // Check if this is a sensor MAC message
+        if (data.size == sizeof(sensor_mac_msg_t)) {
+            sensor_mac_msg_t *mac_msg = (sensor_mac_msg_t*)data.data;
+            if (mac_msg->msg_type == MSG_TYPE_SENSOR_MAC) {
+                // This is a MAC address message from a sensor
+                ESP_LOGI(MESH_TAG, "🎯 SENSOR MAC RECEIVED: "MACSTR" (Layer %d, Time: %lu) from "MACSTR"", 
+                         MAC2STR(mac_msg->mac_addr), mac_msg->layer, mac_msg->timestamp, MAC2STR(from.addr));
+                continue; // Don't process as regular light control message
+            }
+        }
+        
+        /* extract send count for legacy messages */
         if (data.size >= sizeof(send_count)) {
             send_count = (data.data[25] << 24) | (data.data[24] << 16)
                          | (data.data[23] << 8) | data.data[22];
         }
-        recv_count++;
+        
         /* process light control */
         mesh_light_process(&from, data.data, data.size);
-        if (!(recv_count % 1)) {
+        
+        // Log regular messages (less frequently to avoid spam)
+        if (!(recv_count % 10)) {
             ESP_LOGW(MESH_TAG,
                      "[#RX:%d/%d][L:%d] parent:"MACSTR", receive from "MACSTR", size:%d, heap:%" PRId32 ", flag:%d[err:0x%x, proto:%d, tos:%d]",
                      recv_count, send_count, mesh_layer,
@@ -197,6 +225,16 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_MESH_STARTED>ID:"MACSTR"", MAC2STR(id.addr));
         is_mesh_connected = false;
         mesh_layer = esp_mesh_get_layer();
+        
+        /* GATEWAY: Immediately become root and create network */
+        ESP_LOGI(MESH_TAG, "GATEWAY: Setting as root and creating network immediately");
+        ESP_ERROR_CHECK(esp_mesh_set_type(MESH_ROOT));
+        ESP_ERROR_CHECK(esp_mesh_connect());
+        
+        /* GATEWAY: Start P2P communication as root */
+        is_mesh_connected = true;  // Set as connected since we're the root
+        esp_mesh_comm_p2p_start();
+        ESP_LOGI(MESH_TAG, "GATEWAY: P2P communication started as root");
     }
     break;
     case MESH_EVENT_STOPPED: {
@@ -340,12 +378,6 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHANNEL_SWITCH>new channel:%d", channel_switch->channel);
     }
     break;
-    case MESH_EVENT_SCAN_DONE: {
-        mesh_event_scan_done_t *scan_done = (mesh_event_scan_done_t *)event_data;
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_SCAN_DONE>number:%d",
-                 scan_done->number);
-    }
-    break;
     case MESH_EVENT_NETWORK_STATE: {
         mesh_event_network_state_t *network_state = (mesh_event_network_state_t *)event_data;
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_NETWORK_STATE>is_rootless:%d",
@@ -358,7 +390,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     break;
     case MESH_EVENT_FIND_NETWORK: {
         mesh_event_find_network_t *find_network = (mesh_event_find_network_t *)event_data;
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_FIND_NETWORK>new channel:%d, router BSSID:"MACSTR"",
+        ESP_LOGI(MESH_TAG, "<MESH_EVENT_FIND_NETWORK>new channel:%d, router BSSID:"MACSTR"", 
                  find_network->channel, MAC2STR(find_network->router_bssid));
     }
     break;
@@ -397,82 +429,69 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(mesh_light_init());
     ESP_ERROR_CHECK(nvs_flash_init());
-    /*  tcpip initialization */
+    /* tcpip initialization */
     ESP_ERROR_CHECK(esp_netif_init());
-    /*  event initialization */
+    /* event initialization */
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    /*  create network interfaces for mesh (only station instance saved for further manipulation, soft AP instance ignored */
+    /* create network interfaces for mesh */
     ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
-    /*  wifi initialization */
+    /* wifi initialization */
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&config));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
     ESP_ERROR_CHECK(esp_wifi_start());
-    /*  mesh initialization */
+    /* mesh initialization */
     ESP_ERROR_CHECK(esp_mesh_init());
     ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
-    /*  set mesh topology */
     ESP_ERROR_CHECK(esp_mesh_set_topology(CONFIG_MESH_TOPOLOGY));
-    /*  set mesh max layer according to the topology */
     ESP_ERROR_CHECK(esp_mesh_set_max_layer(CONFIG_MESH_MAX_LAYER));
     ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
     ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
     
-    /* 🆕 GATEWAY: Configure as standalone fixed root for router-independent mesh
-     * - Fixed root: true (this device will be the root)
-     * - Self-organized: false (prevents root node election, maintains fixed root)
-     * - No router dependency: mesh forms independently
-     */
-    ESP_ERROR_CHECK(esp_mesh_fix_root(true));
-    ESP_ERROR_CHECK(esp_mesh_set_self_organized(false, false));
-    ESP_LOGI(MESH_TAG, "GATEWAY: Configured as standalone fixed root - no router dependency");
-    
+    /* GATEWAY: Configure as self-organizing root (not fixed root) */
+    ESP_ERROR_CHECK(esp_mesh_fix_root(false));  // All devices must use same fixed root setting
+    ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, true));  // Enable self-organizing + become root
+    ESP_LOGI(MESH_TAG, "GATEWAY: Configured as self-organizing root");
+
 #ifdef CONFIG_MESH_ENABLE_PS
-    /* Enable mesh PS function */
     ESP_ERROR_CHECK(esp_mesh_enable_ps());
-    /* better to increase the associate expired time, if a small duty cycle is set. */
     ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
-    /* better to increase the announce interval to avoid too much management traffic, if a small duty cycle is set. */
-    ESP_ERROR_CHECK(esp_mesh_set_announce_interval(600, 3300));
 #else
-    /* Disable mesh PS function */
     ESP_ERROR_CHECK(esp_mesh_disable_ps());
     ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
 #endif
+
     mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
-    /* mesh ID */
+    /* All credentials are taken from sdkconfig */
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
-    /* channel (must match the router's channel) */
     cfg.channel = CONFIG_MESH_CHANNEL;
+    memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD, strlen(CONFIG_MESH_AP_PASSWD));
     
-    /* 🆕 GATEWAY: Remove router configuration for standalone mesh
-     * - No router SSID/password: creates independent mesh network
-     * - Gateway becomes root without external WiFi dependency
-     * - Perfect for GPRS-enabled field deployment
-     */
-    cfg.router.ssid_len = 0;
-    memset((uint8_t *) &cfg.router.ssid, 0, sizeof(cfg.router.ssid));
-    memset((uint8_t *) &cfg.router.password, 0, sizeof(cfg.router.password));
-    memset((uint8_t *) &cfg.router.bssid, 0, sizeof(cfg.router.bssid));
-    
-    /* mesh softAP */
-    ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
+    /* Router-less mesh: Provide minimal valid router credentials for validation */
+    /* These credentials satisfy ESP-IDF validation but won't be used in router-less operation */
+    strcpy((char*)cfg.router.ssid, "dummy");
+    cfg.router.ssid_len = strlen("dummy");
+    strcpy((char*)cfg.router.password, "dummy_password");
+    memset(cfg.router.bssid, 0, sizeof(cfg.router.bssid));
+
     cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
     cfg.mesh_ap.nonmesh_max_connection = CONFIG_MESH_NON_MESH_AP_CONNECTIONS;
-    memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD,
-           strlen(CONFIG_MESH_AP_PASSWD));
+    
+    ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
     ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
-    /* mesh start */
+
+    /* Mesh start */
     ESP_ERROR_CHECK(esp_mesh_start());
     
-#ifdef CONFIG_MESH_ENABLE_PS
-    /* set the device active duty cycle. (default:10, MESH_PS_DEVICE_DUTY_REQUEST) */
-    ESP_ERROR_CHECK(esp_mesh_set_active_duty_cycle(CONFIG_MESH_PS_DEV_DUTY, CONFIG_MESH_PS_DEV_DUTY_TYPE));
-    /* set the network active duty cycle. (default:10, -1, MESH_PS_NETWORK_DUTY_APPLIED_ENTIRE) */
-    ESP_ERROR_CHECK(esp_mesh_set_network_duty_cycle(CONFIG_MESH_PS_NWK_DUTY, CONFIG_MESH_PS_NWK_DUTY_DURATION, CONFIG_MESH_PS_NWK_DUTY_RULE));
-#endif
+    ESP_LOGI(MESH_TAG, "GATEWAY: Root node started and connecting to router");
+
     ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  esp_get_minimum_free_heap_size(),
              esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
              esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", esp_mesh_is_ps_enabled());
+
+    /* Keep the gateway running - prevent app_main() from returning */
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Sleep for 1 second
+    }
 }

@@ -39,7 +39,6 @@ static const char *MESH_TAG = "mesh_main";
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static bool is_running = true;
 static bool is_mesh_connected = false;
-static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
 
@@ -83,7 +82,6 @@ void esp_mesh_p2p_rx_main(void *arg)
     int recv_count = 0;
     esp_err_t err;
     mesh_addr_t from;
-    int send_count = 0;
     mesh_data_t data;
     int flag = 0;
     data.data = rx_buf;
@@ -107,22 +105,15 @@ void esp_mesh_p2p_rx_main(void *arg)
                 // This is a MAC address message from a sensor
                 ESP_LOGI(MESH_TAG, "🎯 SENSOR MAC RECEIVED: "MACSTR" (Layer %d, Time: %lu) from "MACSTR"", 
                          MAC2STR(mac_msg->mac_addr), mac_msg->layer, mac_msg->timestamp, MAC2STR(from.addr));
-                continue; // Don't process as regular light control message
+                continue; // Don't process as regular message
             }
         }
         
-        /* extract send count for legacy messages */
-        if (data.size >= sizeof(send_count)) {
-            send_count = (data.data[25] << 24) | (data.data[24] << 16)
-                         | (data.data[23] << 8) | data.data[22];
-        }
-        
-        // Log regular messages (less frequently to avoid spam)
+        // Log other messages (less frequently to avoid spam)
         if (!(recv_count % 10)) {
             ESP_LOGW(MESH_TAG,
-                     "[#RX:%d/%d][L:%d] parent:"MACSTR", receive from "MACSTR", size:%d, heap:%" PRId32 ", flag:%d[err:0x%x, proto:%d, tos:%d]",
-                     recv_count, send_count, mesh_layer,
-                     MAC2STR(mesh_parent_addr.addr), MAC2STR(from.addr),
+                     "[#RX:%d][L:%d] receive from "MACSTR", size:%d, heap:%" PRId32 ", flag:%d[err:0x%x, proto:%d, tos:%d]",
+                     recv_count, mesh_layer, MAC2STR(from.addr),
                      data.size, esp_get_minimum_free_heap_size(), flag, err, data.proto,
                      data.tos);
         }
@@ -213,12 +204,9 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         mesh_event_connected_t *connected = (mesh_event_connected_t *)event_data;
         esp_mesh_get_id(&id);
         mesh_layer = connected->self_layer;
-        memcpy(&mesh_parent_addr.addr, connected->connected.bssid, 6);
         ESP_LOGI(MESH_TAG,
-                 "<MESH_EVENT_PARENT_CONNECTED>layer:%d-->%d, parent:"MACSTR"%s, ID:"MACSTR", duty:%d",
-                 last_layer, mesh_layer, MAC2STR(mesh_parent_addr.addr),
-                 esp_mesh_is_root() ? "<ROOT>" :
-                 (mesh_layer == 2) ? "<layer2>" : "", MAC2STR(id.addr), connected->duty);
+                 "<MESH_EVENT_PARENT_CONNECTED>layer:%d-->%d, ID:"MACSTR", duty:%d",
+                 last_layer, mesh_layer, MAC2STR(id.addr), connected->duty);
         last_layer = mesh_layer;
         is_mesh_connected = true;
         if (esp_mesh_is_root()) {
@@ -235,16 +223,6 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  disconnected->reason);
         is_mesh_connected = false;
         mesh_layer = esp_mesh_get_layer();
-    }
-    break;
-    case MESH_EVENT_LAYER_CHANGE: {
-        mesh_event_layer_change_t *layer_change = (mesh_event_layer_change_t *)event_data;
-        mesh_layer = layer_change->new_layer;
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_LAYER_CHANGE>layer:%d-->%d%s",
-                 last_layer, mesh_layer,
-                 esp_mesh_is_root() ? "<ROOT>" :
-                 (mesh_layer == 2) ? "<layer2>" : "");
-        last_layer = mesh_layer;
     }
     break;
     case MESH_EVENT_ROOT_ADDRESS: {
@@ -277,8 +255,7 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     case MESH_EVENT_ROOT_SWITCH_ACK: {
         /* new root */
         mesh_layer = esp_mesh_get_layer();
-        esp_mesh_get_parent_bssid(&mesh_parent_addr);
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_ROOT_SWITCH_ACK>layer:%d, parent:"MACSTR"", mesh_layer, MAC2STR(mesh_parent_addr.addr));
+        ESP_LOGI(MESH_TAG, "<MESH_EVENT_ROOT_SWITCH_ACK>layer:%d", mesh_layer);
     }
     break;
     case MESH_EVENT_TODS_STATE: {

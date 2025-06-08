@@ -336,30 +336,19 @@ void esp_mesh_sensor_mac_tx_main(void *arg)
 
 void esp_mesh_p2p_tx_main(void *arg)
 {
-    int send_count = 0;
-    mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
-    int route_table_size = 0;
     is_running = true;
 
     while (is_running) {
-        /* Sensors don't send broadcast data - only specific sensor messages */
+        /* Sensors primarily use dedicated MAC TX task for communication */
         if (!esp_mesh_is_root()) {
-            ESP_LOGI(MESH_TAG, "layer:%d, rtableSize:%d, %s", mesh_layer,
-                     esp_mesh_get_routing_table_size(),
-                     is_mesh_connected ? "NODE" : "DISCONNECT");
-            vTaskDelay(10 * 1000 / portTICK_PERIOD_MS);
+            ESP_LOGD(MESH_TAG, "Sensor in layer:%d, %s", mesh_layer,
+                     is_mesh_connected ? "CONNECTED" : "DISCONNECTED");
+            vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
             continue;
         }
         
-        /* This shouldn't execute for sensors, but keep minimal functionality */
-        esp_mesh_get_routing_table((mesh_addr_t *) &route_table,
-                                   CONFIG_MESH_ROUTE_TABLE_SIZE * 6, &route_table_size);
-        send_count++;
-        
-        ESP_LOGI(MESH_TAG, "sensor tx task: rtableSize:%d, send_count:%d", 
-                 route_table_size, send_count);
-        
-        /* Long delay since sensors use dedicated MAC TX task */
+        /* Sensors should never become root, but handle gracefully */
+        ESP_LOGW(MESH_TAG, "⚠️ Sensor unexpectedly became root - check configuration");
         vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
     }
     vTaskDelete(NULL);
@@ -370,7 +359,6 @@ void esp_mesh_p2p_rx_main(void *arg)
     int recv_count = 0;
     esp_err_t err;
     mesh_addr_t from;
-    int send_count = 0;
     mesh_data_t data;
     int flag = 0;
     data.data = rx_buf;
@@ -384,21 +372,15 @@ void esp_mesh_p2p_rx_main(void *arg)
             ESP_LOGE(MESH_TAG, "err:0x%x, size:%d", err, data.size);
             continue;
         }
-        /* extract send count */
-        if (data.size >= sizeof(send_count)) {
-            send_count = (data.data[25] << 24) | (data.data[24] << 16)
-                         | (data.data[23] << 8) | data.data[22];
-        }
+        
         recv_count++;
         
-        // Log sensor RX activity
+        // Log sensor RX activity (simplified for sensors)
         if (!(recv_count % 10)) {
-            ESP_LOGW(MESH_TAG,
-                     "[#RX:%d][L:%d] parent:"MACSTR", receive from "MACSTR", size:%d, heap:%" PRId32 ", flag:%d[err:0x%x, proto:%d, tos:%d]",
-                     recv_count, mesh_layer,
-                     MAC2STR(mesh_parent_addr.addr), MAC2STR(from.addr),
-                     data.size, esp_get_minimum_free_heap_size(), flag, err, data.proto,
-                     data.tos);
+            ESP_LOGD(MESH_TAG,
+                     "[#RX:%d][L:%d] from "MACSTR", size:%d, heap:%" PRId32,
+                     recv_count, mesh_layer, MAC2STR(from.addr),
+                     data.size, esp_get_minimum_free_heap_size());
         }
     }
     vTaskDelete(NULL);
@@ -448,25 +430,12 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
                  MAC2STR(child_connected->mac));
     }
     break;
-    case MESH_EVENT_CHILD_DISCONNECTED: {
-        mesh_event_child_disconnected_t *child_disconnected = (mesh_event_child_disconnected_t *)event_data;
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_DISCONNECTED>aid:%d, "MACSTR"",
-                 child_disconnected->aid,
-                 MAC2STR(child_disconnected->mac));
-    }
-    break;
     case MESH_EVENT_ROUTING_TABLE_ADD: {
-        mesh_event_routing_table_change_t *routing_table = (mesh_event_routing_table_change_t *)event_data;
-        ESP_LOGW(MESH_TAG, "<MESH_EVENT_ROUTING_TABLE_ADD>add %d, new:%d, layer:%d",
-                 routing_table->rt_size_change,
-                 routing_table->rt_size_new, mesh_layer);
+        ESP_LOGD(MESH_TAG, "<MESH_EVENT_ROUTING_TABLE_ADD>");
     }
     break;
     case MESH_EVENT_ROUTING_TABLE_REMOVE: {
-        mesh_event_routing_table_change_t *routing_table = (mesh_event_routing_table_change_t *)event_data;
-        ESP_LOGW(MESH_TAG, "<MESH_EVENT_ROUTING_TABLE_REMOVE>remove %d, new:%d, layer:%d",
-                 routing_table->rt_size_change,
-                 routing_table->rt_size_new, mesh_layer);
+        ESP_LOGD(MESH_TAG, "<MESH_EVENT_ROUTING_TABLE_REMOVE>");
     }
     break;
     case MESH_EVENT_NO_PARENT_FOUND: {

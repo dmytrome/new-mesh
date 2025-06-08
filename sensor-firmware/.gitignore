@@ -1,0 +1,65 @@
+# ESP-IDF Build System
+build/
+sdkconfig.old
+managed_components/
+
+# Dependencies and components
+dependencies.lock
+
+# Flash and partition files
+*.bin
+*.elf
+*.map
+bootloader.bin
+partition-table.bin
+
+# IDE and Editor files
+.vscode/
+.vs/
+*.code-workspace
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# ESP-IDF specific
+.espressif/
+esp-idf/
+menuconfig/
+
+# Flash download tool files
+*.map
+*.bin.bak
+
+# Custom configuration backups
+sdkconfig.defaults.bak
+sdkconfig.*.old 

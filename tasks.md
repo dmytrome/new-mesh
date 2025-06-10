@@ -135,7 +135,7 @@ cd ../sensor-firmware && idf.py build
 cd gateway-firmware && idf.py flash monitor
 
 # flash_sensor.sh
-#!/bin/bash
+#!/bin/bash  
 cd sensor-firmware && idf.py flash monitor
 ```
 

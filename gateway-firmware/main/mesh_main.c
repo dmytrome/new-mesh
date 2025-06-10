@@ -8,23 +8,12 @@
 #include "esp_mesh_internal.h"
 #include "esp_sleep.h"
 #include "nvs_flash.h"
+#include "message_protocol.h"
 
 /*******************************************************
  *                Macros
  *******************************************************/
 static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
-
-/*******************************************************
- *                Message Types
- *******************************************************/
-typedef struct {
-    uint8_t msg_type;           // Message type identifier
-    uint8_t mac_addr[6];        // MAC address
-    uint8_t layer;              // Mesh layer
-    uint32_t timestamp;         // Timestamp
-} sensor_mac_msg_t;
-
-#define MSG_TYPE_SENSOR_MAC 0x01
 
 /*******************************************************
  *                Constants
@@ -67,7 +56,7 @@ void esp_mesh_p2p_tx_main(void *arg)
         send_count++;
         
         if (!(send_count % 10)) {
-            ESP_LOGI(MESH_TAG, "GATEWAY STATUS: Connected sensors:%d/%d, cycle:%d", 
+            ESP_LOGI(MESH_TAG, "🌐 GATEWAY STATUS: Connected sensors:%d/%d, cycle:%d", 
                      route_table_size, esp_mesh_get_routing_table_size(), send_count);
         }
         
@@ -98,13 +87,56 @@ void esp_mesh_p2p_rx_main(void *arg)
         
         recv_count++;
         
-        // Check if this is a sensor MAC message
-        if (data.size == sizeof(sensor_mac_msg_t)) {
-            sensor_mac_msg_t *mac_msg = (sensor_mac_msg_t*)data.data;
-            if (mac_msg->msg_type == MSG_TYPE_SENSOR_MAC) {
-                // This is a MAC address message from a sensor
-                ESP_LOGI(MESH_TAG, "🎯 SENSOR MAC RECEIVED: "MACSTR" (Layer %d, Time: %lu) from "MACSTR"", 
-                         MAC2STR(mac_msg->mac_addr), mac_msg->layer, mac_msg->timestamp, MAC2STR(from.addr));
+        // Check if this is a new agricultural sensor message
+        if (data.size == sizeof(sensor_message_t)) {
+            sensor_message_t *sensor_msg = (sensor_message_t*)data.data;
+            
+            // Validate checksum
+            uint16_t expected_checksum = calculate_checksum(sensor_msg, sizeof(sensor_message_t) - sizeof(sensor_msg->checksum));
+            if (sensor_msg->checksum != expected_checksum) {
+                ESP_LOGW(MESH_TAG, "❌ Invalid checksum from "MACSTR" - expected 0x%04X, got 0x%04X", 
+                         MAC2STR(from.addr), expected_checksum, sensor_msg->checksum);
+                continue;
+            }
+            
+            // First, show what we received in the same format as sensor sends
+            ESP_LOGI(MESH_TAG, "📥 RECEIVED agricultural data: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d, Seq %d)", 
+                     sensor_msg->data.temp_air, sensor_msg->data.soil_temp, sensor_msg->data.hum_air, 
+                     sensor_msg->data.lux, sensor_msg->data.soil_ph,
+                     sensor_msg->header.mesh_layer, sensor_msg->header.sequence_number);
+            
+            // Process agricultural sensor data
+            if (sensor_msg->header.message_type == MSG_TYPE_SENSOR_DATA) {
+                // Use MAC address directly and make layer prominent
+                ESP_LOGI(MESH_TAG, "🌱 AGRICULTURAL DATA ["MACSTR" L%d]: %.1f°C, %.1f%% RH, %d lux, pH %.1f", 
+                         MAC2STR(sensor_msg->header.node_mac),
+                         sensor_msg->header.mesh_layer,
+                         sensor_msg->data.temp_air, 
+                         sensor_msg->data.hum_air, 
+                         sensor_msg->data.lux, 
+                         sensor_msg->data.soil_ph);
+                         
+                ESP_LOGI(MESH_TAG, "🌱 SOIL DATA ["MACSTR" L%d]: Temp %.1f°C, Hum %.1f%%, EC %d µS/cm, NPK(%d,%d,%d)", 
+                         MAC2STR(sensor_msg->header.node_mac),
+                         sensor_msg->header.mesh_layer,
+                         sensor_msg->data.soil_temp,
+                         sensor_msg->data.soil_hum, 
+                         sensor_msg->data.soil_ec,
+                         sensor_msg->data.soil_n,
+                         sensor_msg->data.soil_p, 
+                         sensor_msg->data.soil_k);
+                         
+                ESP_LOGI(MESH_TAG, "🔋 STATUS ["MACSTR" L%d]: Battery %.2fV (%dmV), Seq %d, Quality %d%%", 
+                         MAC2STR(sensor_msg->header.node_mac),
+                         sensor_msg->header.mesh_layer,
+                         sensor_msg->data.bat_lvl,
+                         sensor_msg->data.bat_vol,
+                         sensor_msg->header.sequence_number,
+                         sensor_msg->data.reading_quality);
+                
+                // TODO: Here you could save to a collection for MQTT JSON generation
+                // Example: store_sensor_data_for_mqtt(sensor_msg);
+                
                 continue; // Don't process as regular message
             }
         }

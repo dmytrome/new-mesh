@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "mesh_network.h"
 #include "message_handler.h"
+#include "rtc_manager.h"
 
 /*******************************************************
  *                Constants & Macros
@@ -151,6 +152,9 @@ static esp_err_t coordinated_sensor_cycle(void)
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
+    
+    // Initialize RTC Manager for time synchronization and sleep coordination
+    ESP_ERROR_CHECK(rtc_manager_init());
     
     // Check wake-up reason for ultra-low power coordination
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();

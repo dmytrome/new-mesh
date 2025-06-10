@@ -10,6 +10,7 @@
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "mesh_network.h"
+#include "message_handler.h"
 
 /*******************************************************
  *                Constants & Macros
@@ -20,10 +21,6 @@
 #define SENSOR_READ_TIMEOUT_SEC       5     // 5 seconds to read all sensors
 #define DATA_SEND_TIMEOUT_SEC         10    // 10 seconds to send data
 #define EMERGENCY_SLEEP_SEC           300   // 5 minutes emergency sleep
-
-// Communication Constants
-#define RX_SIZE          (1500)
-#define TX_SIZE          (1460)
 
 /*******************************************************
  *                Type Definitions
@@ -44,29 +41,11 @@ typedef enum {
  *******************************************************/
 static const char *MESH_TAG = "mesh_main";
 
-// Communication buffers
-static uint8_t rx_buf[RX_SIZE] = { 0, };
-
-// Mesh state variables (now accessed via mesh_network module)
-static bool is_running = true;
-
 // Coordination variables
 static coordinated_state_t current_state = COORD_STATE_WAKE_UP;
 static bool time_synchronized = false;
 static bool data_collection_done = false;
 static uint32_t wake_start_time = 0;
-
-/*******************************************************
- *                Message Types
- *******************************************************/
-typedef struct {
-    uint8_t msg_type;           // Message type identifier
-    uint8_t mac_addr[6];        // MAC address
-    uint8_t layer;              // Mesh layer
-    uint32_t timestamp;         // Timestamp
-} sensor_mac_msg_t;
-
-#define MSG_TYPE_SENSOR_MAC 0x01
 
 /*******************************************************
  *                Ultra-Low Power Functions
@@ -163,128 +142,6 @@ static esp_err_t coordinated_sensor_cycle(void)
     ESP_LOGI(MESH_TAG, "💤 Entering emergency sleep (TODO: implement coordinated sleep)");
     enter_coordinated_deep_sleep(EMERGENCY_SLEEP_SEC);
     
-    return ESP_OK;
-}
-
-/*******************************************************
- *                Communication Functions
- *******************************************************/
-void esp_mesh_sensor_mac_tx_main(void *arg)
-{
-    mesh_data_t data;
-    uint8_t mac[6];
-    mesh_addr_t gateway_addr;
-    sensor_mac_msg_t mac_msg;
-    esp_err_t err;
-    is_running = true;
-    
-    // Get our MAC address
-    esp_wifi_get_mac(WIFI_IF_STA, mac);
-    
-    // Prepare MAC message
-    mac_msg.msg_type = MSG_TYPE_SENSOR_MAC;
-    memcpy(mac_msg.mac_addr, mac, 6);
-    mac_msg.layer = 0; // Will be updated when we know our layer
-    mac_msg.timestamp = 0; // Will be updated each send
-    
-    data.data = (uint8_t*)&mac_msg;
-    data.size = sizeof(mac_msg);
-    data.proto = MESH_PROTO_BIN;
-    data.tos = MESH_TOS_P2P;
-    
-    // Gateway address (root address)
-    memset(&gateway_addr, 0, sizeof(gateway_addr));
-    
-    ESP_LOGI(MESH_TAG, "📡 Sensor MAC TX task started - MAC: "MACSTR"", MAC2STR(mac));
-    
-    while (is_running) {
-        // Only send if we're connected to mesh
-        if (mesh_network_is_mesh_connected() && !esp_mesh_is_root()) {
-            // Update current info
-            mac_msg.layer = mesh_network_get_current_layer();
-            mac_msg.timestamp = esp_timer_get_time() / 1000000; // seconds
-            
-            // Send to root (gateway)
-            err = esp_mesh_send(&gateway_addr, &data, MESH_DATA_P2P, NULL, 0);
-            if (err == ESP_OK) {
-                ESP_LOGI(MESH_TAG, "📤 Sent MAC to gateway: "MACSTR" (Layer %d)", 
-                         MAC2STR(mac), mac_msg.layer);
-            } else {
-                ESP_LOGW(MESH_TAG, "❌ Failed to send MAC to gateway: 0x%x", err);
-            }
-        } else {
-            ESP_LOGD(MESH_TAG, "⏳ Waiting for mesh connection before sending MAC...");
-        }
-        
-        // Send every 10 seconds
-        vTaskDelay(10 * 1000 / portTICK_PERIOD_MS);
-    }
-    vTaskDelete(NULL);
-}
-
-void esp_mesh_p2p_tx_main(void *arg)
-{
-    is_running = true;
-
-    while (is_running) {
-        /* Sensors primarily use dedicated MAC TX task for communication */
-        if (!esp_mesh_is_root()) {
-            ESP_LOGD(MESH_TAG, "Sensor in layer:%d, %s", mesh_network_get_current_layer(),
-                     mesh_network_is_mesh_connected() ? "CONNECTED" : "DISCONNECTED");
-            vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
-            continue;
-        }
-        
-        /* Sensors should never become root, but handle gracefully */
-        ESP_LOGW(MESH_TAG, "⚠️ Sensor unexpectedly became root - check configuration");
-        vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
-    }
-    vTaskDelete(NULL);
-}
-
-void esp_mesh_p2p_rx_main(void *arg)
-{
-    int recv_count = 0;
-    esp_err_t err;
-    mesh_addr_t from;
-    mesh_data_t data;
-    int flag = 0;
-    data.data = rx_buf;
-    data.size = RX_SIZE;
-    is_running = true;
-
-    while (is_running) {
-        data.size = RX_SIZE;
-        err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0);
-        if (err != ESP_OK || !data.size) {
-            ESP_LOGE(MESH_TAG, "err:0x%x, size:%d", err, data.size);
-            continue;
-        }
-        
-        recv_count++;
-        
-        // Log sensor RX activity (simplified for sensors)
-        if (!(recv_count % 10)) {
-            ESP_LOGD(MESH_TAG,
-                     "[#RX:%d][L:%d] from "MACSTR", size:%d, heap:%" PRId32,
-                     recv_count, mesh_network_get_current_layer(), MAC2STR(from.addr),
-                     data.size, esp_get_minimum_free_heap_size());
-        }
-    }
-    vTaskDelete(NULL);
-}
-
-esp_err_t esp_mesh_comm_p2p_start(void)
-{
-    static bool is_comm_p2p_started = false;
-    if (!is_comm_p2p_started) {
-        is_comm_p2p_started = true;
-        
-        // Sensor: Enable RX and MAC TX for communication testing
-        xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL);
-        xTaskCreate(esp_mesh_sensor_mac_tx_main, "SENSOR_MAC_TX", 3072, NULL, 5, NULL);
-        ESP_LOGI(MESH_TAG, "SENSOR: P2P RX enabled + MAC TX enabled for testing");
-    }
     return ESP_OK;
 }
 

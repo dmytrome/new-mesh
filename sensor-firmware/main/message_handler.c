@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "message_handler.h"
 #include "mesh_network.h"
+#include "time_sync_manager.h"
 
 /*******************************************************
  *                Constants & Variables
@@ -86,46 +87,53 @@ void esp_mesh_sensor_mac_tx_main(void *arg)
     ESP_LOGI(MSG_TAG, "🌱 Agricultural sensor TX task started - MAC: "MACSTR"", MAC2STR(mac));
     
     while (is_running) {
-        // Only send if we're connected to mesh
+        // Only send if we're connected to mesh and in collection window
         if (mesh_network_is_mesh_connected() && !esp_mesh_is_root()) {
-            // Prepare message header
-            memcpy(sensor_msg.header.node_mac, mac, 6);
-            sensor_msg.header.node_type = NODE_TYPE_SENSOR;
-            sensor_msg.header.message_type = MSG_TYPE_SENSOR_DATA;
-            sensor_msg.header.timestamp = esp_timer_get_time() / 1000000;
-            sensor_msg.header.sequence_number = sequence_number++;
-            sensor_msg.header.mesh_layer = mesh_network_get_current_layer();
-            sensor_msg.header.signal_strength = 70; // Simulated signal strength
-            
-            // Collect sensor readings
-            if (collect_sensor_readings(&sensor_msg.data) == ESP_OK) {
-                // Calculate checksum
-                sensor_msg.checksum = calculate_checksum(&sensor_msg, sizeof(sensor_msg) - sizeof(sensor_msg.checksum));
+            // Check if we should send data based on time sync
+            if (is_sensor_time_synchronized() && should_send_sensor_data()) {
+                // Prepare message header
+                memcpy(sensor_msg.header.node_mac, mac, 6);
+                sensor_msg.header.node_type = NODE_TYPE_SENSOR;
+                sensor_msg.header.message_type = MSG_TYPE_SENSOR_DATA;
+                sensor_msg.header.timestamp = esp_timer_get_time() / 1000000;
+                sensor_msg.header.sequence_number = sequence_number++;
+                sensor_msg.header.mesh_layer = mesh_network_get_current_layer();
+                sensor_msg.header.signal_strength = 70; // Simulated signal strength
                 
-                // Prepare mesh data
-                data.data = (uint8_t*)&sensor_msg;
-                data.size = sizeof(sensor_msg);
-                data.proto = MESH_PROTO_BIN;
-                data.tos = MESH_TOS_P2P;
-                
-                // Send to root (gateway)
-                err = esp_mesh_send(&gateway_addr, &data, MESH_DATA_P2P, NULL, 0);
-                if (err == ESP_OK) {
-                    ESP_LOGI(MSG_TAG, "🌱 Sent agricultural data: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d, Seq %d)", 
-                             sensor_msg.data.temp_air, sensor_msg.data.soil_temp, sensor_msg.data.hum_air, 
-                             sensor_msg.data.lux, sensor_msg.data.soil_ph,
-                             sensor_msg.header.mesh_layer, sensor_msg.header.sequence_number);
+                // Collect sensor readings
+                if (collect_sensor_readings(&sensor_msg.data) == ESP_OK) {
+                    // Calculate checksum
+                    sensor_msg.checksum = calculate_checksum(&sensor_msg, sizeof(sensor_msg) - sizeof(sensor_msg.checksum));
+                    
+                    // Prepare mesh data
+                    data.data = (uint8_t*)&sensor_msg;
+                    data.size = sizeof(sensor_msg);
+                    data.proto = MESH_PROTO_BIN;
+                    data.tos = MESH_TOS_P2P;
+                    
+                    // Send to root (gateway)
+                    err = esp_mesh_send(&gateway_addr, &data, MESH_DATA_P2P, NULL, 0);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(MSG_TAG, "🌱 Sent agricultural data: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d, Seq %d)", 
+                                 sensor_msg.data.temp_air, sensor_msg.data.soil_temp, sensor_msg.data.hum_air, 
+                                 sensor_msg.data.lux, sensor_msg.data.soil_ph,
+                                 sensor_msg.header.mesh_layer, sensor_msg.header.sequence_number);
+                    } else {
+                        ESP_LOGW(MSG_TAG, "❌ Failed to send sensor data to gateway: 0x%x", err);
+                    }
                 } else {
-                    ESP_LOGW(MSG_TAG, "❌ Failed to send sensor data to gateway: 0x%x", err);
+                    ESP_LOGW(MSG_TAG, "❌ Failed to collect sensor readings");
                 }
+            } else if (is_sensor_time_synchronized()) {
+                ESP_LOGD(MSG_TAG, "⏳ Outside data collection window - waiting for next cycle");
             } else {
-                ESP_LOGW(MSG_TAG, "❌ Failed to collect sensor readings");
+                ESP_LOGD(MSG_TAG, "⏳ Waiting for time synchronization before sending data");
             }
         } else {
             ESP_LOGD(MSG_TAG, "⏳ Waiting for mesh connection before sending data...");
         }
         
-        // Send every 10 seconds
+        // Send every 10 seconds (but only when appropriate based on time sync)
         vTaskDelay(10 * 1000 / portTICK_PERIOD_MS);
     }
     vTaskDelete(NULL);
@@ -172,7 +180,28 @@ void esp_mesh_p2p_rx_main(void *arg)
         
         recv_count++;
         
-        // Log sensor RX activity (simplified for sensors)
+        // Check if this is a time sync message
+        if (data.size == sizeof(time_sync_message_t)) {
+            time_sync_message_t *sync_msg = (time_sync_message_t*)data.data;
+            
+            if (sync_msg->header.message_type == MSG_TYPE_TIME_SYNC && 
+                sync_msg->header.node_type == NODE_TYPE_GATEWAY) {
+                
+                ESP_LOGI(MSG_TAG, "⏰ Received time sync message from gateway ["MACSTR"]", 
+                         MAC2STR(from.addr));
+                
+                // Process time sync message
+                esp_err_t sync_result = handle_time_sync_message(sync_msg);
+                if (sync_result == ESP_OK) {
+                    ESP_LOGI(MSG_TAG, "✅ Time sync processed successfully");
+                } else {
+                    ESP_LOGW(MSG_TAG, "⚠️ Failed to process time sync: %s", esp_err_to_name(sync_result));
+                }
+                continue;
+            }
+        }
+        
+        // Log other sensor RX activity (simplified for sensors)
         if (!(recv_count % 10)) {
             ESP_LOGD(MSG_TAG,
                      "[#RX:%d][L:%d] from "MACSTR", size:%d, heap:%" PRId32,

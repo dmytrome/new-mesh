@@ -2,6 +2,7 @@
 #define MESSAGE_PROTOCOL_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <time.h>
 
 /*******************************************************

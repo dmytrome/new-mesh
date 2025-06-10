@@ -5,6 +5,7 @@
 #include "esp_mesh.h"
 #include "esp_mac.h"
 #include "message_protocol.h"
+#include "time_sync_manager.h"
 
 /*******************************************************
  *                Constants and Variables
@@ -43,7 +44,13 @@ void esp_mesh_p2p_tx_main(void *arg)
                      route_table_size, esp_mesh_get_routing_table_size(), send_count);
         }
         
-        // Gateway doesn't need to send test data frequently - focus on receiving sensor data
+        // Check if we should broadcast time sync
+        if (is_time_sync_ready() && should_broadcast_sync()) {
+            ESP_LOGI(MESH_TAG, "⏰ Broadcasting time sync to sensors");
+            broadcast_time_sync_to_sensors();
+        }
+        
+        // Gateway status check every 30 seconds
         vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
     }
     vTaskDelete(NULL);
@@ -90,6 +97,9 @@ void esp_mesh_p2p_rx_main(void *arg)
             
             // Process agricultural sensor data
             if (sensor_msg->header.message_type == MSG_TYPE_SENSOR_DATA) {
+                // Notify time sync manager that sensor data was received
+                handle_sensor_data_received(sensor_msg->header.node_mac);
+                
                 // Use MAC address directly and make layer prominent
                 ESP_LOGI(MESH_TAG, "🌱 AGRICULTURAL DATA ["MACSTR" L%d]: %.1f°C, %.1f%% RH, %d lux, pH %.1f", 
                          MAC2STR(sensor_msg->header.node_mac),
@@ -145,7 +155,13 @@ esp_err_t esp_mesh_comm_p2p_start(void)
         // Gateway: Enable both TX and RX
         xTaskCreate(esp_mesh_p2p_tx_main, "MPTX", 3072, NULL, 5, NULL);
         xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL);
-        ESP_LOGI(MESH_TAG, "GATEWAY: P2P TX and RX enabled");
+        ESP_LOGI(MESH_TAG, "GATEWAY: P2P TX and RX enabled with time sync coordination");
     }
     return ESP_OK;
+}
+
+// New function to start message handler from main
+esp_err_t message_handler_start_p2p(void)
+{
+    return esp_mesh_comm_p2p_start();
 } 

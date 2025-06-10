@@ -12,6 +12,7 @@
 #include "mesh_network.h"
 #include "message_handler.h"
 #include "rtc_manager.h"
+#include "time_sync_manager.h"
 
 /*******************************************************
  *                Constants & Macros
@@ -65,37 +66,40 @@ static esp_err_t check_wake_timeout(void)
 
 static esp_err_t wait_for_time_sync_signal(uint32_t timeout_ms)
 {
-    // TODO: Implement time sync reception from gateway
-    // For now, simulate immediate sync for basic operation
-    ESP_LOGI(MESH_TAG, "⏰ Simulating time sync (TODO: implement real time sync)");
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Simulate sync delay
-    return ESP_OK;
+    ESP_LOGI(MESH_TAG, "⏰ Waiting for time sync from gateway...");
+    
+    // Use the time sync manager to wait for sync
+    esp_err_t result = wait_for_time_sync(timeout_ms / 1000);
+    if (result == ESP_OK) {
+        ESP_LOGI(MESH_TAG, "✅ Time sync received successfully");
+        return ESP_OK;
+    } else {
+        ESP_LOGW(MESH_TAG, "⚠️ Time sync timeout - proceeding with emergency operations");
+        return ESP_ERR_TIMEOUT;
+    }
 }
 
 static esp_err_t read_and_send_sensor_data_quick(void)
 {
     ESP_LOGI(MESH_TAG, "📊 Reading sensor data quickly...");
     
-    // TODO: Replace with actual sensor reading
-    // For now, simulate sensor data
-    uint8_t sensor_data[32];
-    memset(sensor_data, 0xAA, sizeof(sensor_data)); // Dummy data
-    
-    // TODO: Send data via mesh efficiently
-    ESP_LOGI(MESH_TAG, "📤 Sensor data collected and ready to send");
-    
-    return ESP_OK;
+    // Use the message handler to send sensor data
+    if (should_send_sensor_data()) {
+        ESP_LOGI(MESH_TAG, "📤 Sensor data collection triggered by time sync window");
+        // Data will be sent by the sensor TX task automatically when in collection window
+        return ESP_OK;
+    } else {
+        ESP_LOGW(MESH_TAG, "⚠️ Not in data collection window");
+        return ESP_ERR_INVALID_STATE;
+    }
 }
 
 static void enter_coordinated_deep_sleep(uint32_t sleep_duration_sec)
 {
     ESP_LOGI(MESH_TAG, "💤 Entering coordinated deep sleep for %lu seconds", sleep_duration_sec);
     
-    // Configure wake-up timer
-    esp_sleep_enable_timer_wakeup(sleep_duration_sec * 1000000ULL); // Convert to microseconds
-    
-    // Enter deep sleep
-    esp_deep_sleep_start();
+    // Use RTC manager for coordinated sleep
+    rtc_enter_deep_sleep(sleep_duration_sec);
 }
 
 static esp_err_t coordinated_sensor_cycle(void)
@@ -105,7 +109,7 @@ static esp_err_t coordinated_sensor_cycle(void)
     
     // Phase 1: Wait for time synchronization (with timeout)
     current_state = COORD_STATE_WAIT_TIME_SYNC;
-    if (wait_for_time_sync_signal(5000) == ESP_OK) {
+    if (wait_for_time_sync_signal(10000) == ESP_OK) {  // 10 second timeout
         time_synchronized = true;
         ESP_LOGI(MESH_TAG, "✅ Time synchronized with gateway");
     } else {
@@ -139,9 +143,20 @@ static esp_err_t coordinated_sensor_cycle(void)
     // Phase 4: Prepare for coordinated sleep
     current_state = COORD_STATE_PREPARE_SLEEP;
     
-    // TODO: Wait for coordinated sleep signal from gateway
-    ESP_LOGI(MESH_TAG, "💤 Entering emergency sleep (TODO: implement coordinated sleep)");
-    enter_coordinated_deep_sleep(EMERGENCY_SLEEP_SEC);
+    if (is_sensor_time_synchronized()) {
+        // Calculate coordinated sleep duration
+        uint32_t sleep_duration;
+        if (calculate_sleep_duration(&sleep_duration) == ESP_OK) {
+            ESP_LOGI(MESH_TAG, "💤 Entering coordinated sleep for %lu seconds", sleep_duration);
+            enter_coordinated_deep_sleep(sleep_duration);
+        } else {
+            ESP_LOGW(MESH_TAG, "💤 Failed to calculate sleep duration - using emergency sleep");
+            enter_coordinated_deep_sleep(EMERGENCY_SLEEP_SEC);
+        }
+    } else {
+        ESP_LOGI(MESH_TAG, "💤 No time sync available - entering emergency sleep");
+        enter_coordinated_deep_sleep(EMERGENCY_SLEEP_SEC);
+    }
     
     return ESP_OK;
 }
@@ -156,6 +171,9 @@ void app_main(void)
     // Initialize RTC Manager for time synchronization and sleep coordination
     ESP_ERROR_CHECK(rtc_manager_init());
     
+    // Initialize Time Sync Manager for coordination with gateway
+    ESP_ERROR_CHECK(sensor_time_sync_init());
+    
     // Check wake-up reason for ultra-low power coordination
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     bool is_coordinated_wake = (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER);
@@ -165,6 +183,9 @@ void app_main(void)
         
         // Fast initialization for coordinated operation
         ESP_ERROR_CHECK(mesh_network_init_full_system(true));
+        
+        // Start message handler for time sync reception
+        ESP_ERROR_CHECK(esp_mesh_comm_p2p_start());
         
         // Execute coordinated ultra-low power cycle
         coordinated_sensor_cycle();
@@ -179,6 +200,9 @@ void app_main(void)
     
     // Full initialization for normal operation
     ESP_ERROR_CHECK(mesh_network_init_full_system(false));
+    
+    // Start message handler (includes time sync reception)
+    ESP_ERROR_CHECK(esp_mesh_comm_p2p_start());
 
     ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  
              esp_get_minimum_free_heap_size(),
@@ -187,6 +211,6 @@ void app_main(void)
              esp_mesh_is_ps_enabled());
              
     // Provide hints for ultra-low power mode
-    ESP_LOGI(MESH_TAG, "💡 Hint: To enable ultra-low power mode, trigger a timer wake-up");
-    ESP_LOGI(MESH_TAG, "🔄 Running in standard continuous mode for now");
+    ESP_LOGI(MESH_TAG, "💡 Ready to receive time sync from gateway for coordinated operation");
+    ESP_LOGI(MESH_TAG, "🔄 Running in standard continuous mode - monitoring for time sync");
 }

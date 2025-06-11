@@ -68,27 +68,12 @@ esp_err_t handle_time_sync_message(const time_sync_message_t *sync_msg)
     sync_status.waiting_for_sync = false;
     sync_status.sync_messages_received++;
     
-    // Calculate data collection window
+    // **IMMEDIATE DATA RESPONSE**: Set collection window immediately upon time sync
     time_t now = time(NULL);
-    
-    // Check if we should be in a data collection window
-    // Collection windows occur every 5 minutes for 60 seconds
-    time_t current_cycle_start = (now / 300) * 300; // Round down to 5-min boundary
-    time_t cycle_end = current_cycle_start + 60; // 60-second collection window
-    
-    if (now >= current_cycle_start && now <= cycle_end) {
-        sync_status.in_collection_window = true;
-        sync_status.collection_start_time = current_cycle_start;
-        sync_status.collection_end_time = cycle_end;
-        time_t remaining = cycle_end - now;
-        ESP_LOGI(TAG, "📊 In data collection window - %lld seconds remaining", 
-                 (long long)remaining);
-    } else {
-        sync_status.in_collection_window = false;
-        time_t next_window = current_cycle_start + 300; // Next 5-min boundary
-        time_t time_to_next_window = next_window - now;
-        ESP_LOGI(TAG, "⏳ Next collection window in %lld seconds", (long long)time_to_next_window);
-    }
+    sync_status.in_collection_window = true;
+    sync_status.collection_start_time = now;
+    sync_status.collection_end_time = now + 30; // 30-second immediate collection window
+    ESP_LOGI(TAG, "📊 Immediate data collection window opened - 30 seconds to respond");
     
     ESP_LOGI(TAG, "✅ Time sync processed (msg #%lu) - Source: %s", 
              sync_status.sync_messages_received,

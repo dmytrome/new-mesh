@@ -271,7 +271,7 @@ esp_err_t init_full_mesh_system(void) {
     ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
 #else
     ESP_ERROR_CHECK(esp_mesh_disable_ps());
-    ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
+    ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(30));  // Increased from 10 to 30 seconds
 #endif
 
     mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();

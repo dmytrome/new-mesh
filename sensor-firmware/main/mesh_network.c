@@ -127,7 +127,7 @@ esp_err_t mesh_network_init_full_system(bool is_fast_init)
         ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
 #else
         ESP_ERROR_CHECK(esp_mesh_disable_ps());
-        ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(10));
+        ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(30));  // Increased from 10 to 30 seconds
 #endif
     }
     

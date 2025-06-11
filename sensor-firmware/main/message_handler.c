@@ -133,8 +133,8 @@ void esp_mesh_sensor_mac_tx_main(void *arg)
             ESP_LOGD(MSG_TAG, "⏳ Waiting for mesh connection before sending data...");
         }
         
-        // Send every 10 seconds (but only when appropriate based on time sync)
-        vTaskDelay(10 * 1000 / portTICK_PERIOD_MS);
+        // Send every 2 seconds for faster response to time sync (was 10 seconds)
+        vTaskDelay(2 * 1000 / portTICK_PERIOD_MS);
     }
     vTaskDelete(NULL);
 }

@@ -192,19 +192,19 @@ menu "SIM800L Configuration"
         int "TX Pin"
         depends on SIM800L_ENABLE
         range 0 48
-        default 21
+        default 17
         help
             GPIO pin number for UART TX (ESP32-S3 -> SIM800L RX).
-            Recommended pins for ESP32-S3: GPIO21, GPIO17, GPIO15, GPIO16.
+            Safe pins for ESP32-S3: GPIO17, GPIO16, GPIO15, GPIO7, GPIO6.
 
     config SIM800L_RX_PIN
         int "RX Pin"
         depends on SIM800L_ENABLE
         range 0 48
-        default 20
+        default 18
         help
             GPIO pin number for UART RX (SIM800L TX -> ESP32-S3).
-            Recommended pins for ESP32-S3: GPIO20, GPIO18, GPIO14, GPIO13.
+            Safe pins for ESP32-S3: GPIO18, GPIO8, GPIO3, GPIO9, GPIO10.
 
     config SIM800L_BAUD_RATE
         int "Baud Rate"
@@ -216,22 +216,22 @@ menu "SIM800L Configuration"
     config SIM800L_APN
         string "APN (Access Point Name)"
         depends on SIM800L_ENABLE
-        default "internet"
+        default "everywhere"
         help
-            APN for GPRS connection (check with your cellular provider).
+            APN for GPRS connection. For EE UK: "everywhere"
 
     config SIM800L_APN_USERNAME
         string "APN Username"
         depends on SIM800L_ENABLE
-        default ""
+        default "eesecure"
         help
-            APN username (leave empty if not required by your provider).
+            APN username. For EE UK: "eesecure"
 
     config SIM800L_APN_PASSWORD
         string "APN Password"
         depends on SIM800L_ENABLE
-        default ""
+        default "secure"
         help
-            APN password (leave empty if not required by your provider).
+            APN password. For EE UK: "secure"
 
 endmenu 

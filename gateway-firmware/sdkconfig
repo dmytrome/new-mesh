@@ -581,6 +581,12 @@ CONFIG_MESH_ROUTE_TABLE_SIZE=50
 # end of Ultra-Low Power Mesh Configuration
 
 #
+# SIM800L Configuration
+#
+# CONFIG_SIM800L_ENABLE is not set
+# end of SIM800L Configuration
+
+#
 # Compiler options
 #
 # CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set

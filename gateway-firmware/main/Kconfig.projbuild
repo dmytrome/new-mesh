@@ -169,4 +169,69 @@ menu "Ultra-Low Power Mesh Configuration"
         default 50
         help
             The number of devices over the network(max: 300).
+
+endmenu
+
+menu "SIM800L Configuration"
+
+    config SIM800L_ENABLE
+        bool "Enable SIM800L GSM/GPRS Module"
+        default n
+        help
+            Enable SIM800L GSM/GPRS module for cellular connectivity.
+
+    config SIM800L_UART_PORT
+        int "UART Port Number"
+        depends on SIM800L_ENABLE
+        range 0 2
+        default 2
+        help
+            UART port number for SIM800L communication (usually UART2).
+
+    config SIM800L_TX_PIN
+        int "TX Pin"
+        depends on SIM800L_ENABLE
+        range 0 48
+        default 21
+        help
+            GPIO pin number for UART TX (ESP32-S3 -> SIM800L RX).
+            Recommended pins for ESP32-S3: GPIO21, GPIO17, GPIO15, GPIO16.
+
+    config SIM800L_RX_PIN
+        int "RX Pin"
+        depends on SIM800L_ENABLE
+        range 0 48
+        default 20
+        help
+            GPIO pin number for UART RX (SIM800L TX -> ESP32-S3).
+            Recommended pins for ESP32-S3: GPIO20, GPIO18, GPIO14, GPIO13.
+
+    config SIM800L_BAUD_RATE
+        int "Baud Rate"
+        depends on SIM800L_ENABLE
+        default 9600
+        help
+            Communication baud rate for SIM800L (typically 9600 or 115200).
+
+    config SIM800L_APN
+        string "APN (Access Point Name)"
+        depends on SIM800L_ENABLE
+        default "internet"
+        help
+            APN for GPRS connection (check with your cellular provider).
+
+    config SIM800L_APN_USERNAME
+        string "APN Username"
+        depends on SIM800L_ENABLE
+        default ""
+        help
+            APN username (leave empty if not required by your provider).
+
+    config SIM800L_APN_PASSWORD
+        string "APN Password"
+        depends on SIM800L_ENABLE
+        default ""
+        help
+            APN password (leave empty if not required by your provider).
+
 endmenu 

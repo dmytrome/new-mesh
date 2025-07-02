@@ -1,14 +1,20 @@
 #include "mesh_network.h"
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 #include "esp_wifi.h"
 #include "esp_mac.h"
 #include "esp_mesh_internal.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 
 /*******************************************************
  *                Constants and Variables
  *******************************************************/
 static const char *MESH_TAG = "mesh_network";
+
+// SNTP initialization flag
+static bool sntp_initialized = false;
 
 // Mesh constants (extracted from mesh_main.c)
 const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
@@ -17,6 +23,40 @@ const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 static bool is_mesh_connected = false;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
+
+/*******************************************************
+ *                SNTP Functions
+ *******************************************************/
+
+static void initialize_sntp(void) {
+    if (sntp_initialized) {
+        ESP_LOGW(MESH_TAG, "⚠️ SNTP already initialized");
+        return;
+    }
+    
+    ESP_LOGI(MESH_TAG, "🕐 Initializing SNTP for time sync");
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    sntp_initialized = true;
+    
+    // Wait for time to be set
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    int retry = 0;
+    const int retry_count = 10;
+    while (timeinfo.tm_year < (2016 - 1900) && ++retry < retry_count) {
+        ESP_LOGI(MESH_TAG, "🕐 Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+    if (timeinfo.tm_year < (2016 - 1900)) {
+        ESP_LOGW(MESH_TAG, "⚠️ System time was not set via NTP. Proceeding anyway.");
+    } else {
+        ESP_LOGI(MESH_TAG, "✅ System time is set: %s", asctime(&timeinfo));
+    }
+}
 
 /*******************************************************
  *                Public Interface Functions
@@ -232,6 +272,18 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
 {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(MESH_TAG, "<IP_EVENT_STA_GOT_IP>IP:" IPSTR, IP2STR(&event->ip_info.ip));
+    
+    // Initialize SNTP for time sync after getting IP address
+    initialize_sntp();
+    
+    // Start MQTT client after getting IP address
+    extern esp_err_t mqtt_handler_start(void);
+    esp_err_t err = mqtt_handler_start();
+    if (err == ESP_OK) {
+        ESP_LOGI(MESH_TAG, "☁️ MQTT client started successfully");
+    } else {
+        ESP_LOGE(MESH_TAG, "❌ Failed to start MQTT client: %s", esp_err_to_name(err));
+    }
 }
 
 /*******************************************************
@@ -280,11 +332,10 @@ esp_err_t init_full_mesh_system(void) {
     cfg.channel = CONFIG_MESH_CHANNEL;
     memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD, strlen(CONFIG_MESH_AP_PASSWD));
     
-    /* Router-less mesh: Provide minimal valid router credentials for validation */
-    /* These credentials satisfy ESP-IDF validation but won't be used in router-less operation */
-    strcpy((char*)cfg.router.ssid, "dummy");
-    cfg.router.ssid_len = strlen("dummy");
-    strcpy((char*)cfg.router.password, "dummy_password");
+    /* GATEWAY: Connect to real WiFi router using fast scan approach */
+    strcpy((char*)cfg.router.ssid, CONFIG_MESH_ROUTER_SSID);
+    cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
+    strcpy((char*)cfg.router.password, CONFIG_MESH_ROUTER_PASSWD);
     memset(cfg.router.bssid, 0, sizeof(cfg.router.bssid));
 
     cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;

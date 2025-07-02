@@ -10,7 +10,7 @@
  *                Constants
  *******************************************************/
 // Mesh constants that will be extracted from main
-extern const uint8_t MESH_ID[6];
+// Note: MESH_ID is now static and initialized at runtime with unique MAC address
 
 // Communication Constants
 #define RX_SIZE          (1500)

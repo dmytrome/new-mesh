@@ -15,7 +15,8 @@
 static const char *MESH_TAG = "mesh_network";
 
 // Mesh constants (extracted from main)
-const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
+// Use device MAC address as unique MESH_ID to avoid conflicts between multiple sensors
+static uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 
 // Mesh state variables (extracted from main)
 static bool is_mesh_connected = false;
@@ -26,6 +27,18 @@ static esp_netif_t *netif_sta = NULL;
 /*******************************************************
  *                Internal Functions (extracted from mesh_main.c)
  *******************************************************/
+static esp_err_t init_unique_mesh_id(void)
+{
+    uint8_t mac[6];
+    ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+    
+    // Use the device's unique MAC address as MESH_ID
+    memcpy(MESH_ID, mac, 6);
+    
+    ESP_LOGI(MESH_TAG, "Generated unique MESH_ID: "MACSTR"", MAC2STR(MESH_ID));
+    return ESP_OK;
+}
+
 static esp_err_t init_wifi_and_netif(void)
 {
     ESP_LOGI(MESH_TAG, "Initializing WiFi and network interfaces...");
@@ -67,7 +80,7 @@ static esp_err_t configure_and_start_mesh(void)
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
     cfg.channel = CONFIG_MESH_CHANNEL;
     
-    // Router-less mesh: Provide minimal valid router credentials for validation
+    // SENSOR: Router-less mesh mode (only connect to gateway, not to router)
     // These credentials satisfy ESP-IDF validation but won't be used in router-less operation
     strcpy((char*)cfg.router.ssid, "dummy");
     cfg.router.ssid_len = strlen("dummy");
@@ -92,6 +105,9 @@ static esp_err_t configure_and_start_mesh(void)
 esp_err_t mesh_network_init_sensor(void)
 {
     ESP_LOGI(MESH_TAG, "Initializing sensor mesh network module");
+    
+    // Initialize unique MESH_ID first
+    ESP_ERROR_CHECK(init_unique_mesh_id());
     
     // Initialize WiFi and network interfaces
     ESP_ERROR_CHECK(init_wifi_and_netif());

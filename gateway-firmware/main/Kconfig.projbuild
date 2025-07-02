@@ -169,4 +169,40 @@ menu "Ultra-Low Power Mesh Configuration"
         default 50
         help
             The number of devices over the network(max: 300).
+
+    # MQTT Configuration
+    config MQTT_ENABLED
+        bool "Enable MQTT for AWS IoT Core"
+        default y
+        help
+            Enable MQTT client for publishing sensor data to AWS IoT Core.
+
+    config MQTT_BROKER_URL
+        string "MQTT Broker URL"
+        default "mqtts://a1w68ba53cj3wf-ats.iot.eu-central-1.amazonaws.com:8883"
+        depends on MQTT_ENABLED
+        help
+            MQTT broker URL for AWS IoT Core.
+
+    config MQTT_CLIENT_ID
+        string "MQTT Client ID"
+        default "gateway_1"
+        depends on MQTT_ENABLED
+        help
+            MQTT client identifier.
+
+    config MQTT_TOPIC_METRICS
+        string "MQTT Metrics Topic"
+        default "gateway/1/metrics"
+        depends on MQTT_ENABLED
+        help
+            MQTT topic for publishing sensor metrics.
+
+    config MESH_TASK_STACK_SIZE
+        int "Mesh Task Stack Size"
+        range 4096 16384
+        default 8192
+        help
+            Stack size for mesh network tasks (increase if experiencing stack overflow).
+
 endmenu 

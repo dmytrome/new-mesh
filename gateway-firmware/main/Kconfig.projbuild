@@ -198,6 +198,14 @@ menu "Ultra-Low Power Mesh Configuration"
         help
             MQTT topic for publishing sensor metrics.
 
+    # Time Sync and Sleep Configuration
+    config SENSOR_SLEEP_PERIOD_MINUTES
+        int "Sensor Sleep Period (minutes)"
+        range 1 1440
+        default 180
+        help
+            How long sensors should sleep between data collection cycles (rounded to next hour).
+
     config MESH_TASK_STACK_SIZE
         int "Mesh Task Stack Size"
         range 4096 16384

@@ -8,6 +8,8 @@
 #include "esp_mesh_internal.h"
 #include "esp_netif.h"
 #include "mesh_network.h"
+#include "nvs_flash.h"
+#include "message_handler.h"
 
 /*******************************************************
  *                Constants & Variables
@@ -80,8 +82,8 @@ static esp_err_t configure_and_start_mesh(void)
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
     cfg.channel = CONFIG_MESH_CHANNEL;
     
-    // SENSOR: Router-less mesh mode (only connect to gateway, not to router)
-    // These credentials satisfy ESP-IDF validation but won't be used in router-less operation
+    // SENSOR: Router-less mesh mode (connect to gateway/root, not directly to router)
+    // In tree topology, sensors connect to the gateway which is the root node
     strcpy((char*)cfg.router.ssid, "dummy");
     cfg.router.ssid_len = strlen("dummy");
     strcpy((char*)cfg.router.password, "dummy_password");
@@ -170,6 +172,10 @@ int mesh_network_get_current_layer(void)
     return mesh_layer;
 }
 
+int mesh_network_get_routing_table_size(void) {
+    return esp_mesh_get_routing_table_size();
+}
+
 /*******************************************************
  *                State Access Functions
  *******************************************************/
@@ -216,6 +222,9 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_CONNECTED>aid:%d, "MACSTR"",
                  child_connected->aid,
                  MAC2STR(child_connected->mac));
+        
+        // Broadcast time sync to new sensor to ensure immediate synchronization
+        broadcast_time_sync_to_new_sensors();
     }
     break;
     case MESH_EVENT_ROUTING_TABLE_ADD: {

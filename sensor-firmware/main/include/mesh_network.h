@@ -24,6 +24,7 @@ esp_err_t mesh_network_start_p2p_communication(void);
 bool mesh_network_is_connected_to_parent(void);
 int mesh_network_get_current_layer(void);
 esp_err_t mesh_network_init_full_system(bool is_fast_init);
+int mesh_network_get_routing_table_size(void);
 
 /*******************************************************
  *                Event Handlers (used by other modules)

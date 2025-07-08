@@ -1,4 +1,5 @@
 #include "mesh_network.h"
+#include "message_handler.h"
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
@@ -16,10 +17,10 @@ static const char *MESH_TAG = "mesh_network";
 // SNTP initialization flag
 static bool sntp_initialized = false;
 
-// Mesh constants (extracted from mesh_main.c)
+// Mesh constants
 const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 
-// Network state variables (extracted from mesh_main.c)
+// Network state variables
 static bool is_mesh_connected = false;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
@@ -75,7 +76,7 @@ esp_netif_t* get_netif_sta(void) {
 }
 
 /*******************************************************
- *                Event Handlers (extracted from mesh_main.c)
+ *                Event Handlers
  *******************************************************/
 
 void mesh_event_handler(void *arg, esp_event_base_t event_base,
@@ -101,6 +102,10 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         extern esp_err_t esp_mesh_comm_p2p_start(void);  // Forward declaration for message handler
         esp_mesh_comm_p2p_start();
         ESP_LOGI(MESH_TAG, "GATEWAY: P2P communication started as root");
+        
+        // Add a small delay to ensure mesh AP is fully ready before accepting connections
+        ESP_LOGI(MESH_TAG, "⏳ Waiting 2 seconds for mesh AP to be fully ready...");
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
     break;
     case MESH_EVENT_STOPPED: {
@@ -142,7 +147,6 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(MESH_TAG, "<MESH_EVENT_NO_PARENT_FOUND>scan times:%d",
                  no_parent->scan_times);
     }
-    /* TODO handler for the failure */
     break;
     case MESH_EVENT_PARENT_CONNECTED: {
         mesh_event_connected_t *connected = (mesh_event_connected_t *)event_data;
@@ -276,18 +280,17 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
     // Initialize SNTP for time sync after getting IP address
     initialize_sntp();
     
-    // Start MQTT client after getting IP address
-    extern esp_err_t mqtt_handler_start(void);
-    esp_err_t err = mqtt_handler_start();
-    if (err == ESP_OK) {
-        ESP_LOGI(MESH_TAG, "☁️ MQTT client started successfully");
-    } else {
-        ESP_LOGE(MESH_TAG, "❌ Failed to start MQTT client: %s", esp_err_to_name(err));
-    }
+    // Initialize time coordination after SNTP is set up
+    // This establishes the unified wake-up time for all devices
+    initialize_time_coordination();
+    
+    // DON'T start MQTT client immediately - wait until sensors send data and disconnect
+    ESP_LOGI(MESH_TAG, "🕐 Time sync initialized, waiting for sensors to send data before starting MQTT");
+    ESP_LOGI(MESH_TAG, "☁️ MQTT will start when all sensors disconnect and data is ready to publish");
 }
 
 /*******************************************************
- *                Mesh Initialization (extracted from app_main)
+ *                Mesh Initialization
  *******************************************************/
 
 esp_err_t init_full_mesh_system(void) {

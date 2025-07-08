@@ -64,11 +64,11 @@ static esp_err_t check_wake_timeout(void)
 
 static esp_err_t wait_for_time_sync_signal(uint32_t timeout_ms)
 {
-    // TODO: Implement time sync reception from gateway
-    // For now, simulate immediate sync for basic operation
-    ESP_LOGI(MESH_TAG, "⏰ Simulating time sync (TODO: implement real time sync)");
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Simulate sync delay
-    return ESP_OK;
+    // Wait for time sync message from gateway (handled in message_handler.c)
+    // The message handler will automatically set RTC and schedule wake-up
+    ESP_LOGI(MESH_TAG, "⏰ Waiting for time sync from gateway...");
+    vTaskDelay(timeout_ms / portTICK_PERIOD_MS);
+    return ESP_OK; // Time sync will be handled by message handler
 }
 
 static esp_err_t read_and_send_sensor_data_quick(void)
@@ -152,37 +152,21 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
     
-    // Check wake-up reason for ultra-low power coordination
-    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-    bool is_coordinated_wake = (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER);
-    
-    if (is_coordinated_wake) {
-        ESP_LOGI(MESH_TAG, "⏰ Coordinated wake-up detected - entering ultra-low power mode");
-        
-        // Fast initialization for coordinated operation
-        ESP_ERROR_CHECK(mesh_network_init_full_system(true));
-        
-        // Execute coordinated ultra-low power cycle
-        coordinated_sensor_cycle();
-        
-        // Should not reach here (will deep sleep)
-        ESP_LOGW(MESH_TAG, "⚠️ Coordinated cycle returned unexpectedly");
-        return;
-    }
-    
-    // Normal initialization for standard operation or first boot
+    // Add random startup delay to prevent all sensors from connecting simultaneously
+    // This helps avoid timing conflicts during mesh formation
+    uint32_t mac_last_bytes;
+    esp_read_mac((uint8_t*)&mac_last_bytes, ESP_MAC_WIFI_STA);
+    uint32_t delay_ms = (mac_last_bytes % 5000) + 1000; // 1-6 second random delay
+    ESP_LOGI(MESH_TAG, "🔄 Adding startup delay: %lu ms to avoid connection conflicts", delay_ms);
+    vTaskDelay(delay_ms / portTICK_PERIOD_MS);
+
     ESP_LOGI(MESH_TAG, "🔄 Normal boot - initializing standard mesh operation");
     
-    // Full initialization for normal operation
+    // Initialize mesh network system
     ESP_ERROR_CHECK(mesh_network_init_full_system(false));
-
-    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  
-             esp_get_minimum_free_heap_size(),
-             esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
-             esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", 
-             esp_mesh_is_ps_enabled());
-             
-    // Provide hints for ultra-low power mode
+    
+    ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%lu, root not fixed<0>(tree), ps:0",
+             esp_get_minimum_free_heap_size());
     ESP_LOGI(MESH_TAG, "💡 Hint: To enable ultra-low power mode, trigger a timer wake-up");
     ESP_LOGI(MESH_TAG, "🔄 Running in standard continuous mode for now");
 }

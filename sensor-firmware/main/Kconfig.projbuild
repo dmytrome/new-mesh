@@ -169,4 +169,28 @@ menu "Ultra-Low Power Mesh Configuration"
         default 50
         help
             The number of devices over the network(max: 300).
+
+    config SENSOR_DATA_WAIT_TIME_SEC
+        int "Sensor data wait time before/after send (seconds)"
+        range 1 60
+        default 10
+        help
+            Time to wait for mesh connections before and after sending data (in seconds).
+
+    config SENSOR_CHILDREN_WAIT_TIME_SEC
+        int "Maximum wait time for children to disconnect (seconds)"
+        range 60 1800
+        default 300
+        help
+            Maximum time to wait for mesh children to disconnect before forcing deep sleep (in seconds).
+            Increase this value for deeper mesh networks with more layers.
+
+    config SENSOR_CHILDREN_CHECK_INTERVAL_SEC
+        int "Interval between mesh children checks (seconds)"
+        range 1 30
+        default 5
+        help
+            How often to check if mesh children have disconnected (in seconds).
+            Lower values drain battery faster but respond quicker to topology changes.
+
 endmenu 

@@ -32,6 +32,11 @@ void esp_mesh_p2p_rx_main(void *arg);
 esp_err_t esp_mesh_comm_p2p_start(void);
 
 /*******************************************************
+ *                Time Synchronization
+ *******************************************************/
+void broadcast_time_sync_to_new_sensors(void);
+
+/*******************************************************
  *                Sensor Data Collection
  *******************************************************/
 esp_err_t collect_sensor_readings(sensor_data_t* data);

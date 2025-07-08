@@ -582,6 +582,7 @@ CONFIG_MQTT_ENABLED=y
 CONFIG_MQTT_BROKER_URL="mqtts://a1w68ba53cj3wf-ats.iot.eu-central-1.amazonaws.com:8883"
 CONFIG_MQTT_CLIENT_ID="gateway_1"
 CONFIG_MQTT_TOPIC_METRICS="gateway/1/metrics"
+CONFIG_SENSOR_SLEEP_PERIOD_MINUTES=2
 CONFIG_MESH_TASK_STACK_SIZE=16384
 # end of Ultra-Low Power Mesh Configuration
 

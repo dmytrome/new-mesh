@@ -280,9 +280,8 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
     // Initialize SNTP for time sync after getting IP address
     initialize_sntp();
     
-    // Initialize time coordination after SNTP is set up
-    // This establishes the unified wake-up time for all devices
-    initialize_time_coordination();
+    // Time coordination is now done dynamically when receiving sensor data
+    // Each time we receive sensor data, we calculate a fresh wake time = current_time + sleep_period
     
     // DON'T start MQTT client immediately - wait until sensors send data and disconnect
     ESP_LOGI(MESH_TAG, "🕐 Time sync initialized, waiting for sensors to send data before starting MQTT");

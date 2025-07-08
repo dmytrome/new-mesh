@@ -20,16 +20,15 @@ void send_time_sync_message(const mesh_addr_t* dest_addr);
 static uint8_t rx_buf[RX_SIZE] = { 0, };
 static bool is_running = true;
 
-// Global wake-up coordination
-static time_t gateway_start_time = 0;  // Time when gateway first synced with WiFi
-static time_t unified_wake_time = 0;   // Unified wake-up time for all devices
-static bool time_coordination_initialized = false;
+// Global wake-up coordination - calculate once, use for all sensors
+static time_t unified_wake_time = 0;   // Unified wake-up time for all devices (calculated once)
+static bool wake_time_set = false;     // Flag to ensure wake time is calculated only once
 
 // Sensor data storage for combined payload
 typedef struct {
     bool has_data;
     sensor_message_t data;
-    char sensor_id[8]; // "1:0", "1:1", etc.
+    char sensor_id[18]; // MAC address format: "fc:01:2c:ca:a0:ac"
 } sensor_data_entry_t;
 
 #define MAX_SENSORS 10
@@ -55,9 +54,10 @@ static int find_sensor_by_mac(uint8_t *mac) {
         int idx = sensor_count++;
         memcpy(sensor_data[idx].data.header.node_mac, mac, 6);
         sensor_data[idx].has_data = false;
-        // Generate sensor ID based on MAC
-        int sensor_number = (mac[4] + mac[5]) % 10;
-        snprintf(sensor_data[idx].sensor_id, sizeof(sensor_data[idx].sensor_id), "1:%d", sensor_number);
+        // Generate sensor ID using full MAC address
+        snprintf(sensor_data[idx].sensor_id, sizeof(sensor_data[idx].sensor_id), 
+                "%02x:%02x:%02x:%02x:%02x:%02x", 
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         return idx;
     }
     
@@ -138,13 +138,34 @@ static bool should_publish(void) {
         }
     }
     
-    // Get current connected nodes count
+    // Get current connected nodes count - for gateway, this includes itself
     int connected_nodes = esp_mesh_get_routing_table_size();
     
-    // Publish if we have data from sensors AND no nodes are connected (all sensors are sleeping)
-    if (active_sensors >= 1 && connected_nodes == 0) {
-        ESP_LOGI(MESH_TAG, "📤 Publishing trigger: %d sensors with data, %d nodes connected", 
+    // Debug information
+    static int last_active_sensors = -1;
+    static int last_connected_nodes = -1;
+    if (active_sensors != last_active_sensors || connected_nodes != last_connected_nodes) {
+        ESP_LOGI(MESH_TAG, "📊 Publish check: %d sensors with data, %d nodes in routing table", 
                  active_sensors, connected_nodes);
+        last_active_sensors = active_sensors;
+        last_connected_nodes = connected_nodes;
+    }
+    
+    // For gateway (root), routing table includes itself, so connected_nodes will be at least 1
+    // Publish if we have data from sensors AND routing table size is minimal (only gateway/router)
+    // In tree topology, routing table size should be close to 1 when all sensors are sleeping
+    if (active_sensors >= 1 && connected_nodes <= 1) {
+        ESP_LOGI(MESH_TAG, "📤 Publishing trigger: %d sensors with data, %d nodes in routing table (all sensors disconnected)", 
+                 active_sensors, connected_nodes);
+        return true;
+    }
+    
+    // Emergency timeout trigger: ONLY if we have data and a very long time has passed
+    // This prevents stuck data but should rarely be used - sensors should disconnect properly
+    if (active_sensors >= 1 && (now - last_data_received_time) > 120) { // 2 minutes emergency timeout
+        ESP_LOGW(MESH_TAG, "⚠️ Emergency publishing trigger (timeout): %d sensors with data, %d seconds since last data", 
+                 active_sensors, (int)(now - last_data_received_time));
+        ESP_LOGW(MESH_TAG, "⚠️ This suggests sensors are not disconnecting properly after sending data");
         return true;
     }
     
@@ -155,39 +176,38 @@ static bool should_publish(void) {
  *                Time Coordination Functions
  *******************************************************/
 
-// Initialize unified wake-up time when gateway first connects to WiFi
-void initialize_time_coordination(void) {
-    if (!time_coordination_initialized) {
-        gateway_start_time = time(NULL);
+// Initialize unified wake time (called once when first sensor sends data)
+void initialize_unified_wake_time(void) {
+    if (!wake_time_set) {
+        time_t current_time = time(NULL);
         int sleep_period_minutes = CONFIG_SENSOR_SLEEP_PERIOD_MINUTES;
         
-        // Calculate unified wake time as: current_time + sleep_period + buffer_time
-        // This ensures sensors have time to connect, send data, and receive time sync
-        int buffer_minutes = 5; // 5 minutes buffer for sensor operations
-        unified_wake_time = gateway_start_time + ((sleep_period_minutes + buffer_minutes) * 60);
-        time_coordination_initialized = true;
+        // Calculate unified wake time as: current_real_time + sleep_period
+        // This wake time will be used for ALL sensors to ensure synchronized wake-up
+        unified_wake_time = current_time + (sleep_period_minutes * 60);
+        wake_time_set = true;
         
-        ESP_LOGI(MESH_TAG, "🕐 Time coordination initialized:");
-        ESP_LOGI(MESH_TAG, "   Gateway start time: %lld", (long long)gateway_start_time);
+        ESP_LOGI(MESH_TAG, "🕐 Unified wake time initialized (will be used for ALL sensors):");
+        ESP_LOGI(MESH_TAG, "   Current time: %lld", (long long)current_time);
+        ESP_LOGI(MESH_TAG, "   Sleep period: %d minutes", sleep_period_minutes);
         ESP_LOGI(MESH_TAG, "   Unified wake time: %lld", (long long)unified_wake_time);
-        ESP_LOGI(MESH_TAG, "   Sleep period: %d minutes + %d buffer", sleep_period_minutes, buffer_minutes);
     }
 }
 
-// Calculate individual sleep duration for current time
-uint32_t calculate_sleep_duration(time_t current_time) {
-    if (current_time >= unified_wake_time) {
-        ESP_LOGW(MESH_TAG, "⚠️ Current time (%lld) >= unified wake time (%lld), using minimum sleep", 
-                 (long long)current_time, (long long)unified_wake_time);
+// Calculate individual sleep duration for given wake time
+uint32_t calculate_sleep_duration(time_t current_time, time_t wake_time) {
+    if (current_time >= wake_time) {
+        ESP_LOGW(MESH_TAG, "⚠️ Current time (%lld) >= wake time (%lld), using minimum sleep", 
+                 (long long)current_time, (long long)wake_time);
         return 10; // Minimum 10 seconds
     }
-    return (uint32_t)(unified_wake_time - current_time);
+    return (uint32_t)(wake_time - current_time);
 }
 
 // Gateway deep sleep coordination
 void gateway_enter_deep_sleep(void) {
     time_t now = time(NULL);
-    uint32_t sleep_duration = calculate_sleep_duration(now);
+    uint32_t sleep_duration = calculate_sleep_duration(now, unified_wake_time);
     
     ESP_LOGI(MESH_TAG, "🌙 Gateway entering deep sleep:");
     ESP_LOGI(MESH_TAG, "   Current time: %lld", (long long)now);
@@ -298,32 +318,25 @@ void esp_mesh_p2p_tx_main(void *arg)
             }
         }
         
-        // Initialize time coordination if not done yet
-        if (!time_coordination_initialized) {
-            initialize_time_coordination();
-        }
+        // Time coordination is now done dynamically when receiving sensor data
         
-        // Send periodic time sync with unified wake-up time
-        static time_t last_time_sync = 0;
-        time_t now = time(NULL);
-        if (now - last_time_sync >= 30) { // Every 30 seconds
-            if (current_connected_nodes > 0) {
-                ESP_LOGI(MESH_TAG, "🕐 Periodic unified time sync broadcast to %d connected sensors", current_connected_nodes);
-                
-                // Send time sync to all connected sensors
-                for (int i = 0; i < route_table_size && i < current_connected_nodes; i++) {
-                    send_time_sync_message(&route_table[i]);
-                    vTaskDelay(100 / portTICK_PERIOD_MS); // Small delay between sends
-                }
-                
-                // Also broadcast to all (in case routing table is not complete)
-                send_time_sync_message(NULL);
-                last_time_sync = now;
+        // Remove periodic time sync broadcast - only send time sync to sensors that sent data
+        // This is now handled in the RX task when receiving sensor data
+        
+        // Check for publishing more frequently when we have sensor data
+        int active_sensors = 0;
+        for (int i = 0; i < sensor_count; i++) {
+            if (sensor_data[i].has_data) {
+                active_sensors++;
             }
         }
         
-        // Gateway doesn't need to send test data frequently - focus on receiving sensor data
-        vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
+        // If we have sensor data, check more frequently for publishing opportunities
+        if (active_sensors > 0) {
+            vTaskDelay(5 * 1000 / portTICK_PERIOD_MS); // Check every 5 seconds when we have data
+        } else {
+            vTaskDelay(30 * 1000 / portTICK_PERIOD_MS); // Normal 30 second interval when idle
+        }
     }
     vTaskDelete(NULL);
 }
@@ -408,8 +421,25 @@ void esp_mesh_p2p_rx_main(void *arg)
                     ESP_LOGI(MESH_TAG, "💾 Stored data for sensor %s (total sensors: %d)", 
                              sensor_data[sensor_idx].sensor_id, sensor_count);
                     
-                    // Don't send time sync immediately - let all sensors connect and send data first
-                    // Time sync will be sent when sensors disconnect (in the TX task)
+                    // Send time sync to ALL connected sensors (data might come through intermediate nodes)
+                    ESP_LOGI(MESH_TAG, "🕐 Sending time sync to ALL connected sensors after receiving data");
+                    
+                    // Get current routing table to send time sync to all connected nodes
+                    mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
+                    int route_table_size = CONFIG_MESH_ROUTE_TABLE_SIZE;
+                    esp_err_t ret = esp_mesh_get_routing_table(route_table, 
+                                                             CONFIG_MESH_ROUTE_TABLE_SIZE * sizeof(mesh_addr_t), 
+                                                             &route_table_size);
+                    
+                    if (ret == ESP_OK && route_table_size > 0) {
+                        ESP_LOGI(MESH_TAG, "🕐 Broadcasting time sync to %d connected nodes", route_table_size);
+                        for (int i = 0; i < route_table_size; i++) {
+                            send_time_sync_message(&route_table[i]);
+                            vTaskDelay(100 / portTICK_PERIOD_MS); // Small delay between sends
+                        }
+                    } else {
+                        ESP_LOGW(MESH_TAG, "⚠️ Failed to get routing table for time sync broadcast");
+                    }
                 } else {
                     ESP_LOGW(MESH_TAG, "❌ No space available for new sensor "MACSTR"", MAC2STR(sensor_msg->header.node_mac));
                 }
@@ -445,14 +475,12 @@ esp_err_t esp_mesh_comm_p2p_start(void)
 }
 
 void send_time_sync_message(const mesh_addr_t* dest_addr) {
-    // Ensure time coordination is initialized
-    if (!time_coordination_initialized) {
-        initialize_time_coordination();
-    }
+    // Initialize wake time once when first sensor sends data
+    initialize_unified_wake_time();
     
     time_sync_message_t msg = {0};
     time_t now = time(NULL);
-    uint32_t sleep_duration = calculate_sleep_duration(now);
+    uint32_t sleep_duration = calculate_sleep_duration(now, unified_wake_time);
     
     uint8_t gateway_mac[6];
     esp_read_mac(gateway_mac, ESP_MAC_WIFI_STA);
@@ -464,7 +492,7 @@ void send_time_sync_message(const mesh_addr_t* dest_addr) {
     msg.header.mesh_layer = 0;
     msg.header.signal_strength = 0;
     msg.current_unix_time = (uint32_t)now;
-    msg.next_wake_time = (uint32_t)unified_wake_time;  // Use unified wake time
+    msg.next_wake_time = (uint32_t)unified_wake_time;  // Use SAME wake time for ALL sensors
     msg.sleep_duration_sec = (uint16_t)sleep_duration;  // Individual sleep duration
     msg.sync_source = 2; // NTP
     msg.collection_window_sec = 10; // 10 sec window

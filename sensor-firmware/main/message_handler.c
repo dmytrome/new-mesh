@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "message_handler.h"
 #include "mesh_network.h"
+#include "message_protocol.h"
 
 
 /*******************************************************
@@ -24,6 +25,14 @@ static uint8_t rx_buf[RX_SIZE] = { 0, };
 // Message state variables (extracted from mesh_main.c)
 static bool is_running = true;
 static uint16_t sequence_number = 0;
+
+// Sleep coordination variables
+static time_t stored_unified_wake_time = 0;  // Store wake time from gateway
+static bool time_sync_received = false;      // Flag to track if we got time sync
+static time_t data_sent_time = 0;            // Track when we sent data
+
+// Forward declarations
+static void enter_coordinated_deep_sleep(void);
 
 /*******************************************************
  *                Sensor Data Collection
@@ -89,15 +98,16 @@ void esp_mesh_sensor_mac_tx_main(void *arg)
         memset(&sensor_msg, 0, sizeof(sensor_msg));
         
         // Set message header
+        uint8_t sensor_mac[6];
+        esp_wifi_get_mac(WIFI_IF_STA, sensor_mac);
+        memcpy(sensor_msg.header.node_mac, sensor_mac, 6);
+        sensor_msg.header.node_type = NODE_TYPE_SENSOR;
         sensor_msg.header.message_type = MSG_TYPE_SENSOR_DATA;
         sensor_msg.header.sequence_number = sequence_number++;
         sensor_msg.header.mesh_layer = mesh_network_get_current_layer();
         sensor_msg.header.timestamp = time(NULL);
         
-        // Get gateway address
-        mesh_addr_t gateway_addr = mesh_network_get_parent_addr();
-        
-        // Prepare mesh data
+        // Prepare mesh data for sending to root (gateway)
         mesh_data_t data;
         data.data = (uint8_t*)&sensor_msg;
         data.size = sizeof(sensor_msg);
@@ -115,13 +125,16 @@ void esp_mesh_sensor_mac_tx_main(void *arg)
             data.proto = MESH_PROTO_BIN;
             data.tos = MESH_TOS_P2P;
             
-            // Send to root (gateway)
-            esp_err_t err = esp_mesh_send(&gateway_addr, &data, MESH_DATA_P2P, NULL, 0);
+            // Send to root (gateway) - ESP-MESH will handle routing through intermediate nodes
+            esp_err_t err = esp_mesh_send(NULL, &data, MESH_DATA_TODS, NULL, 0);
             if (err == ESP_OK) {
                 ESP_LOGI(MSG_TAG, "🌱 Sent agricultural data: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d, Seq %d)", 
                          sensor_msg.data.temp_air, sensor_msg.data.soil_temp, sensor_msg.data.hum_air, 
                          sensor_msg.data.lux, sensor_msg.data.soil_ph,
                          sensor_msg.header.mesh_layer, sensor_msg.header.sequence_number);
+                
+                // Record when we sent data for timeout tracking
+                data_sent_time = esp_timer_get_time() / 1000000;
             } else {
                 ESP_LOGW(MSG_TAG, "❌ Failed to send sensor data to gateway: 0x%x", err);
             }
@@ -145,13 +158,28 @@ void esp_mesh_sensor_mac_tx_main(void *arg)
     ESP_LOGI(MSG_TAG, "🌿 Checking for mesh children (max wait: %ds, check interval: %ds)...", max_wait_time, check_interval);
     
     while (check_count < max_checks) {
-        int rtable_size = mesh_network_get_routing_table_size();
-        // rtable_size == 1 means only parent is present (leaf node)
-        if (rtable_size <= 1) {
-            ESP_LOGI(MSG_TAG, "🌿 No mesh children detected (routing table size: %d). Ready for deep sleep after time sync.", rtable_size);
+        // Better way to check if we're a leaf node: check if we have any child connections
+        int child_count = esp_mesh_get_routing_table_size() - 1; // Subtract parent connection
+        
+        // For debugging, also check the actual routing table
+        mesh_addr_t route_table[10];
+        int route_table_size = 10;
+        esp_mesh_get_routing_table(route_table, 10 * sizeof(mesh_addr_t), &route_table_size);
+        
+        ESP_LOGI(MSG_TAG, "🔍 Mesh analysis: routing_table_size=%d, calculated_children=%d, parent_layer=%d", 
+                 esp_mesh_get_routing_table_size(), child_count, mesh_network_get_current_layer());
+        
+        // A sensor at layer 2+ should be able to sleep after sending data if no real children
+        // Check if we're at leaf position (no downstream sensors depend on us)
+        bool is_leaf_node = (child_count <= 0) || (mesh_network_get_current_layer() >= 3);
+        
+        if (is_leaf_node) {
+            ESP_LOGI(MSG_TAG, "🌿 Confirmed leaf node (layer %d, children: %d). Ready for deep sleep after time sync.", 
+                     mesh_network_get_current_layer(), child_count);
             break;
         } else {
-            ESP_LOGI(MSG_TAG, "🌳 Still have mesh children (routing table size: %d). Waiting before sleep... (%d/%d checks)", rtable_size, check_count + 1, max_checks);
+            ESP_LOGI(MSG_TAG, "🌳 Still have mesh children (layer %d, children: %d). Waiting before sleep... (%d/%d checks)", 
+                     mesh_network_get_current_layer(), child_count, check_count + 1, max_checks);
             vTaskDelay(check_interval * 1000 / portTICK_PERIOD_MS);
             check_count++;
         }
@@ -205,9 +233,49 @@ void esp_mesh_p2p_rx_main(void *arg)
 
     while (is_running) {
         data.size = RX_SIZE;
-        err = esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0);
+        
+        // Use timeout instead of portMAX_DELAY to enable timeout checking
+        err = esp_mesh_recv(&from, &data, pdMS_TO_TICKS(5000), &flag, NULL, 0); // 5 second timeout
+        
+        // Check for timeout - if we've been waiting too long for time sync, enter emergency sleep
+        if (data_sent_time > 0 && !time_sync_received) {
+            time_t current_time = esp_timer_get_time() / 1000000;
+            time_t wait_time = current_time - data_sent_time;
+            
+            if (wait_time > 30) { // 30 second timeout
+                ESP_LOGW(MSG_TAG, "⏰ No time sync received within 30 seconds after sending data - entering emergency sleep");
+                ESP_LOGI(MSG_TAG, "💤 Entering emergency deep sleep for 10 seconds...");
+                esp_sleep_enable_timer_wakeup(10 * 1000000ULL); // 10 seconds
+                esp_deep_sleep_start();
+            }
+        }
+        
         if (err != ESP_OK || !data.size) {
-            ESP_LOGE(MSG_TAG, "err:0x%x, size:%d", err, data.size);
+            // Suppress timeout errors (0x400a) as they are expected during normal operation
+            if (err != ESP_ERR_TIMEOUT && err != 0x400a) {
+                ESP_LOGE(MSG_TAG, "mesh_recv error: 0x%x, size:%d", err, data.size);
+            }
+            
+            // IMPORTANT: Check if we already have time sync and can now sleep (after timeout)
+            // This handles the case where sensor received time sync but had children,
+            // and now children have disconnected so it can sleep
+            if (time_sync_received && stored_unified_wake_time > 0) {
+                int child_count = esp_mesh_get_routing_table_size() - 1; // Subtract parent connection
+                bool is_leaf_node = (child_count <= 0) || (mesh_network_get_current_layer() >= 3);
+                
+                if (is_leaf_node) {
+                    ESP_LOGI(MSG_TAG, "🌿 Already have time sync and now confirmed as leaf node - proceeding to sleep");
+                    ESP_LOGI(MSG_TAG, "🔍 Sleep check: routing_table_size=%d, calculated_children=%d, layer=%d, is_leaf=YES", 
+                             esp_mesh_get_routing_table_size(), child_count, mesh_network_get_current_layer());
+                    
+                    // Enter deep sleep after a short delay to allow final processing
+                    vTaskDelay(2000 / portTICK_PERIOD_MS); // 2 second delay
+                    
+                    // Call function that calculates exact sleep time right before sleeping
+                    enter_coordinated_deep_sleep();
+                }
+            }
+            
             continue;
         }
         
@@ -217,6 +285,31 @@ void esp_mesh_p2p_rx_main(void *arg)
         if (recv_count <= 5 || (recv_count % 10) == 0) {
             ESP_LOGI(MSG_TAG, "📨 RX #%d: from "MACSTR", size:%d, expected time_sync size:%d", 
                      recv_count, MAC2STR(from.addr), data.size, sizeof(time_sync_message_t));
+        }
+        
+        // Handle sensor data from children that needs to be forwarded to gateway
+        if (data.size == sizeof(sensor_message_t)) {
+            sensor_message_t *sensor_msg = (sensor_message_t*)data.data;
+            
+            if (sensor_msg->header.message_type == MSG_TYPE_SENSOR_DATA) {
+                ESP_LOGI(MSG_TAG, "📤 Forwarding child sensor data to gateway: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d)", 
+                         sensor_msg->data.temp_air, sensor_msg->data.soil_temp, sensor_msg->data.hum_air, 
+                         sensor_msg->data.lux, sensor_msg->data.soil_ph, sensor_msg->header.mesh_layer);
+                
+                // Forward the data to the gateway/root using TODS
+                mesh_data_t forward_data = {
+                    .data = (uint8_t*)sensor_msg,
+                    .size = sizeof(sensor_message_t)
+                };
+                
+                esp_err_t err = esp_mesh_send(NULL, &forward_data, MESH_DATA_TODS, NULL, 0);
+                if (err == ESP_OK) {
+                    ESP_LOGI(MSG_TAG, "✅ Forwarded child sensor data to gateway successfully");
+                } else {
+                    ESP_LOGW(MSG_TAG, "❌ Failed to forward child sensor data: %s", esp_err_to_name(err));
+                }
+                continue; // Continue processing other messages
+            }
         }
         
         // Handle time sync messages from gateway
@@ -229,11 +322,10 @@ void esp_mesh_p2p_rx_main(void *arg)
             
             if (time_msg->header.message_type == MSG_TYPE_TIME_SYNC) {
                 time_t current_time = time(NULL);
-                time_t unified_wake_time = time_msg->next_wake_time;
                 
                 ESP_LOGI(MSG_TAG, "🕐 Received unified time sync from gateway:");
                 ESP_LOGI(MSG_TAG, "   Gateway current time: %lu", time_msg->current_unix_time);
-                ESP_LOGI(MSG_TAG, "   Unified wake time: %lld", (long long)unified_wake_time);
+                ESP_LOGI(MSG_TAG, "   Unified wake time: %lld", (long long)time_msg->next_wake_time);
                 ESP_LOGI(MSG_TAG, "   My current time: %lld", (long long)current_time);
                 
                 // Set system time to gateway time for synchronization
@@ -247,46 +339,40 @@ void esp_mesh_p2p_rx_main(void *arg)
                 current_time = time(NULL);
                 ESP_LOGI(MSG_TAG, "🕐 Synchronized current time: %lld", (long long)current_time);
                 
+                // Store unified wake time for later calculation
+                stored_unified_wake_time = time_msg->next_wake_time;
+                time_sync_received = true;
+                
                 // CRITICAL: Check for mesh children before going to sleep
                 // Don't sleep if we have other sensors connected through us
-                int rtable_size = mesh_network_get_routing_table_size();
-                if (rtable_size > 1) {
-                    ESP_LOGW(MSG_TAG, "🌳 Cannot sleep yet - still have mesh children (routing table size: %d)", rtable_size);
+                int child_count = esp_mesh_get_routing_table_size() - 1; // Subtract parent connection
+                bool is_leaf_node = (child_count <= 0) || (mesh_network_get_current_layer() >= 3);
+                
+                ESP_LOGI(MSG_TAG, "🔍 Sleep check: routing_table_size=%d, calculated_children=%d, layer=%d, is_leaf=%s", 
+                         esp_mesh_get_routing_table_size(), child_count, mesh_network_get_current_layer(), 
+                         is_leaf_node ? "YES" : "NO");
+                
+                if (!is_leaf_node && child_count > 0) {
+                    ESP_LOGW(MSG_TAG, "🌳 Cannot sleep yet - still have mesh children (layer %d, children: %d)", 
+                             mesh_network_get_current_layer(), child_count);
                     ESP_LOGI(MSG_TAG, "⏳ Waiting for children to disconnect before sleeping...");
                     continue; // Don't sleep, continue receiving messages
                 }
                 
-                ESP_LOGI(MSG_TAG, "🌿 No mesh children detected (routing table size: %d). Ready for deep sleep.", rtable_size);
-                
-                // Calculate sleep duration for coordinated wake-up
-                time_t sleep_duration;
-                if (current_time >= unified_wake_time) {
-                    sleep_duration = 10; // Minimum 10 seconds if wake time has passed
-                } else {
-                    sleep_duration = unified_wake_time - current_time;
-                }
-                
-                // Add layer-based delay: deeper layers sleep first to avoid connection breaks
-                // This ensures sensors in higher layers (closer to gateway) stay awake longer
-                // to maintain connection paths for deeper sensors
-                int layer = mesh_network_get_current_layer();
-                int layer_delay = (layer > 2) ? 0 : (3 - layer) * 30; // Layer 2 waits 30s, Layer 1 waits 60s
-                sleep_duration += layer_delay;
+                ESP_LOGI(MSG_TAG, "🌿 Confirmed leaf node (layer %d, children: %d). Ready for deep sleep.", 
+                         mesh_network_get_current_layer(), child_count);
                 
                 ESP_LOGI(MSG_TAG, "⏰ Coordinated sleep calculation:");
-                ESP_LOGI(MSG_TAG, "   Unified wake time: %lld", (long long)unified_wake_time);
-                ESP_LOGI(MSG_TAG, "   My layer: %d, layer delay: %d seconds", layer, layer_delay);
-                ESP_LOGI(MSG_TAG, "   My sleep duration: %lld seconds", (long long)sleep_duration);
-                ESP_LOGI(MSG_TAG, "   Expected wake: %lld", (long long)(current_time + sleep_duration));
+                ESP_LOGI(MSG_TAG, "   Unified wake time: %lld", (long long)stored_unified_wake_time);
+                ESP_LOGI(MSG_TAG, "   My layer: %d (all layers wake at same time)", mesh_network_get_current_layer());
+                ESP_LOGI(MSG_TAG, "   My sleep duration: %lld seconds", (long long)(stored_unified_wake_time - current_time));
+                ESP_LOGI(MSG_TAG, "   Expected wake: %lld", (long long)stored_unified_wake_time);
                 
-                // Schedule wake-up for unified time
-                uint64_t sleep_duration_us = (uint64_t)sleep_duration * 1000000ULL;
-                esp_sleep_enable_timer_wakeup(sleep_duration_us);
-                
-                // Enter deep sleep after a short delay to allow data transmission
+                // Enter deep sleep after a short delay to allow final processing
                 vTaskDelay(2000 / portTICK_PERIOD_MS); // 2 second delay
-                ESP_LOGI(MSG_TAG, "💤 Entering coordinated deep sleep for %lld seconds until unified wake time", (long long)sleep_duration);
-                esp_deep_sleep_start();
+                
+                // Call function that calculates exact sleep time right before sleeping
+                enter_coordinated_deep_sleep();
             } else {
                 ESP_LOGW(MSG_TAG, "⚠️ Received message with time sync size but wrong message type: 0x%02X", 
                          time_msg->header.message_type);
@@ -395,4 +481,44 @@ void broadcast_time_sync_to_new_sensors(void) {
     } else {
         ESP_LOGW(MSG_TAG, "Failed to broadcast time sync: %s", esp_err_to_name(err));
     }
+}
+
+// Function to calculate exact sleep duration right before sleeping
+static void enter_coordinated_deep_sleep(void) {
+    if (!time_sync_received || stored_unified_wake_time == 0) {
+        ESP_LOGW(MSG_TAG, "⚠️ No time sync received, entering emergency sleep");
+        esp_sleep_enable_timer_wakeup(300 * 1000000ULL); // 5 minutes emergency sleep
+        esp_deep_sleep_start();
+        return;
+    }
+    
+    // Calculate sleep duration RIGHT BEFORE entering sleep for maximum accuracy
+    time_t current_time = time(NULL);
+    time_t sleep_duration;
+    
+    if (current_time >= stored_unified_wake_time) {
+        sleep_duration = 10; // Minimum 10 seconds if wake time has passed
+        ESP_LOGW(MSG_TAG, "⚠️ Wake time has passed! Current: %lld, Wake: %lld", 
+                 (long long)current_time, (long long)stored_unified_wake_time);
+    } else {
+        // CRITICAL: All sensors wake at SAME time regardless of layer
+        sleep_duration = stored_unified_wake_time - current_time;
+    }
+    
+    // NO layer delays added - all sensors wake at unified wake time
+    int layer = mesh_network_get_current_layer();
+    
+    ESP_LOGI(MSG_TAG, "⏰ Final coordinated sleep calculation (calculated right before sleep):");
+    ESP_LOGI(MSG_TAG, "   Current time: %lld", (long long)current_time);
+    ESP_LOGI(MSG_TAG, "   Unified wake time: %lld", (long long)stored_unified_wake_time);
+    ESP_LOGI(MSG_TAG, "   My layer: %d (no layer delay applied)", layer);
+    ESP_LOGI(MSG_TAG, "   Exact sleep duration: %lld seconds", (long long)sleep_duration);
+    ESP_LOGI(MSG_TAG, "   Expected wake: %lld", (long long)stored_unified_wake_time);
+    
+    // Schedule wake-up for unified time
+    uint64_t sleep_duration_us = (uint64_t)sleep_duration * 1000000ULL;
+    esp_sleep_enable_timer_wakeup(sleep_duration_us);
+    
+    ESP_LOGI(MSG_TAG, "💤 Entering coordinated deep sleep for %lld seconds until unified wake time", (long long)sleep_duration);
+    esp_deep_sleep_start();
 } 

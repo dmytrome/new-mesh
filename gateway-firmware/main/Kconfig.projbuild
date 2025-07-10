@@ -199,12 +199,19 @@ menu "Ultra-Low Power Mesh Configuration"
             MQTT topic for publishing sensor metrics.
 
     # Time Sync and Sleep Configuration
-    config SENSOR_SLEEP_PERIOD_MINUTES
-        int "Sensor Sleep Period (minutes)"
+    config MESH_SLEEP_CYCLE_MINUTES
+        int "Mesh Sleep Cycle Duration (minutes)"
         range 1 1440
         default 180
         help
-            How long sensors should sleep between data collection cycles (rounded to next hour).
+            Duration of the coordinated mesh network sleep cycle. Gateway calculates unified wake time for all sensors.
+
+    config GATEWAY_EARLY_WAKE_SECONDS
+        int "Gateway Early Wake Time (seconds)"
+        range 0 60
+        default 5
+        help
+            How many seconds earlier the gateway should wake up before sensors to be ready for data collection.
 
     config MESH_TASK_STACK_SIZE
         int "Mesh Task Stack Size"

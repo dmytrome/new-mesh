@@ -69,9 +69,8 @@ static void create_combined_payload(char *json_buffer, size_t buffer_size) {
     time_t now;
     time(&now);
     
-    // Start JSON structure with proper Unix timestamp
     int offset = snprintf(json_buffer, buffer_size, 
-        "{\"timestamp\":\"%lld\",\"nodes\":[", (long long)now);
+        "{\"timestamp\":%lld,\"nodes\":[", (long long)now);
     
     // Add each sensor's data
     bool first_sensor = true;
@@ -180,16 +179,16 @@ static bool should_publish(void) {
 void initialize_unified_wake_time(void) {
     if (!wake_time_set) {
         time_t current_time = time(NULL);
-        int sleep_period_minutes = CONFIG_SENSOR_SLEEP_PERIOD_MINUTES;
+        int sleep_period_minutes = CONFIG_MESH_SLEEP_CYCLE_MINUTES;
         
         // Calculate unified wake time as: current_real_time + sleep_period
         // This wake time will be used for ALL sensors to ensure synchronized wake-up
         unified_wake_time = current_time + (sleep_period_minutes * 60);
         wake_time_set = true;
         
-        ESP_LOGI(MESH_TAG, "🕐 Unified wake time initialized (will be used for ALL sensors):");
+        ESP_LOGI(MESH_TAG, "🕐 Mesh sleep cycle initialized (coordinated by gateway):");
         ESP_LOGI(MESH_TAG, "   Current time: %lld", (long long)current_time);
-        ESP_LOGI(MESH_TAG, "   Sleep period: %d minutes", sleep_period_minutes);
+        ESP_LOGI(MESH_TAG, "   Mesh cycle duration: %d minutes", sleep_period_minutes);
         ESP_LOGI(MESH_TAG, "   Unified wake time: %lld", (long long)unified_wake_time);
     }
 }
@@ -207,11 +206,16 @@ uint32_t calculate_sleep_duration(time_t current_time, time_t wake_time) {
 // Gateway deep sleep coordination
 void gateway_enter_deep_sleep(void) {
     time_t now = time(NULL);
-    uint32_t sleep_duration = calculate_sleep_duration(now, unified_wake_time);
+    
+    // Gateway wakes up early to be ready when sensors wake up
+    int early_wake_seconds = CONFIG_GATEWAY_EARLY_WAKE_SECONDS;
+    time_t gateway_wake_time = unified_wake_time - early_wake_seconds;
+    uint32_t sleep_duration = calculate_sleep_duration(now, gateway_wake_time);
     
     ESP_LOGI(MESH_TAG, "🌙 Gateway entering deep sleep:");
     ESP_LOGI(MESH_TAG, "   Current time: %lld", (long long)now);
-    ESP_LOGI(MESH_TAG, "   Wake time: %lld", (long long)unified_wake_time);
+    ESP_LOGI(MESH_TAG, "   Sensor wake time: %lld", (long long)unified_wake_time);
+    ESP_LOGI(MESH_TAG, "   Gateway wake time: %lld (-%ds early)", (long long)gateway_wake_time, early_wake_seconds);
     ESP_LOGI(MESH_TAG, "   Sleep duration: %" PRIu32 " seconds", sleep_duration);
     
     // Enable timer wake-up
@@ -415,31 +419,21 @@ void esp_mesh_p2p_rx_main(void *arg)
                     memcpy(&sensor_data[sensor_idx].data, sensor_msg, sizeof(sensor_message_t));
                     sensor_data[sensor_idx].has_data = true;
                     
-                    // Update last data received time
+                                        // Update last data received time
                     last_data_received_time = time(NULL);
                     
                     ESP_LOGI(MESH_TAG, "💾 Stored data for sensor %s (total sensors: %d)", 
                              sensor_data[sensor_idx].sensor_id, sensor_count);
                     
-                    // Send time sync to ALL connected sensors (data might come through intermediate nodes)
-                    ESP_LOGI(MESH_TAG, "🕐 Sending time sync to ALL connected sensors after receiving data");
+                    // Send time sync immediately after receiving any sensor data (simple approach)
+                    ESP_LOGI(MESH_TAG, "🕐 Sending time sync after receiving data from "MACSTR"", 
+                             MAC2STR(sensor_msg->header.node_mac));
                     
-                    // Get current routing table to send time sync to all connected nodes
-                    mesh_addr_t route_table[CONFIG_MESH_ROUTE_TABLE_SIZE];
-                    int route_table_size = CONFIG_MESH_ROUTE_TABLE_SIZE;
-                    esp_err_t ret = esp_mesh_get_routing_table(route_table, 
-                                                             CONFIG_MESH_ROUTE_TABLE_SIZE * sizeof(mesh_addr_t), 
-                                                             &route_table_size);
+                    // Send time sync to the specific sensor that sent data
+                    mesh_addr_t sender_addr;
+                    memcpy(sender_addr.addr, from.addr, 6);
+                    send_time_sync_message(&sender_addr);
                     
-                    if (ret == ESP_OK && route_table_size > 0) {
-                        ESP_LOGI(MESH_TAG, "🕐 Broadcasting time sync to %d connected nodes", route_table_size);
-                        for (int i = 0; i < route_table_size; i++) {
-                            send_time_sync_message(&route_table[i]);
-                            vTaskDelay(100 / portTICK_PERIOD_MS); // Small delay between sends
-                        }
-                    } else {
-                        ESP_LOGW(MESH_TAG, "⚠️ Failed to get routing table for time sync broadcast");
-                    }
                 } else {
                     ESP_LOGW(MESH_TAG, "❌ No space available for new sensor "MACSTR"", MAC2STR(sensor_msg->header.node_mac));
                 }

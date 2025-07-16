@@ -1,6 +1,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <sys/time.h>
+#include <math.h>
 #include "esp_wifi.h"
 #include "esp_mac.h"
 #include "esp_log.h"
@@ -12,6 +13,7 @@
 #include "message_handler.h"
 #include "mesh_network.h"
 #include "message_protocol.h"
+#include "bme_sensor.h"
 
 
 /*******************************************************
@@ -44,14 +46,30 @@ esp_err_t collect_sensor_readings(sensor_data_t* data)
     // Simulate agricultural sensor readings (replace with real sensors later)
     data->lux = 450 + (esp_timer_get_time() % 200);  // 450-650 lux
     
-    // Air measurements
-    data->temp_air = 22.5f + ((esp_timer_get_time() % 100) / 50.0f);  // 22.5-24.5°C
-    data->hum_air = 65.0f + ((esp_timer_get_time() % 200) / 10.0f);   // 65-85%
+    // Air measurements from BME280/BME680 sensor
+    // Try to read BME sensor, but gracefully handle any issues with null values
+    // Use temporary variables to avoid packed struct alignment warnings
+    float temp_air_reading, hum_air_reading, pressure_air_reading;
+    if (bme_sensor_is_available() && 
+        bme_sensor_read_temp_hum_pressure(&temp_air_reading, &hum_air_reading, &pressure_air_reading) == ESP_OK) {
+        // Sensor available and working - use real values
+        data->temp_air = temp_air_reading;
+        data->hum_air = hum_air_reading;
+        data->pressure_air = pressure_air_reading;
+        ESP_LOGD(MSG_TAG, "✅ BME sensor: %.2f°C, %.2f%% RH, %.2f hPa", 
+                 data->temp_air, data->hum_air, data->pressure_air);
+    } else {
+        // Sensor not available or failed - set null values and continue
+        data->temp_air = NAN;
+        data->hum_air = NAN;
+        data->pressure_air = NAN;
+        ESP_LOGD(MSG_TAG, "⚠️ BME sensor not available - using null values");
+    }
     
-    // Ground temperature
+    // Ground temperature (simulated)
     data->temp_ground = 18.0f + ((esp_timer_get_time() % 80) / 40.0f); // 18-20°C
     
-    // Soil measurements
+    // Soil measurements (simulated)
     data->soil_temp = 19.0f + ((esp_timer_get_time() % 60) / 30.0f);  // 19-21°C  
     data->soil_hum = 45.0f + ((esp_timer_get_time() % 300) / 10.0f);  // 45-75%
     data->soil_ec = 800 + (esp_timer_get_time() % 400);               // 800-1200 µS/cm
@@ -71,8 +89,8 @@ esp_err_t collect_sensor_readings(sensor_data_t* data)
     data->sensor_status = 0x00;  // No errors
     data->reading_quality = 95;  // 95% quality
     
-    ESP_LOGD(MSG_TAG, "📊 Collected sensor data: %.1f°C, %.1f%% RH, %d lux, pH %.1f", 
-             data->temp_air, data->hum_air, data->lux, data->soil_ph);
+    ESP_LOGD(MSG_TAG, "📊 Collected sensor data: %.1f°C, %.1f%% RH, %.1f hPa, %d lux, pH %.1f", 
+             data->temp_air, data->hum_air, data->pressure_air, data->lux, data->soil_ph);
     
     return ESP_OK;
 }
@@ -128,10 +146,9 @@ void esp_mesh_sensor_mac_tx_main(void *arg)
             // Send to root (gateway) - ESP-MESH will handle routing through intermediate nodes
             esp_err_t err = esp_mesh_send(NULL, &data, MESH_DATA_TODS, NULL, 0);
             if (err == ESP_OK) {
-                ESP_LOGI(MSG_TAG, "🌱 Sent agricultural data: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d, Seq %d)", 
-                         sensor_msg.data.temp_air, sensor_msg.data.soil_temp, sensor_msg.data.hum_air, 
-                         sensor_msg.data.lux, sensor_msg.data.soil_ph,
-                         sensor_msg.header.mesh_layer, sensor_msg.header.sequence_number);
+                ESP_LOGI(MSG_TAG, "🌱 Sent agricultural data: Air %.1f°C, %.1f%% RH, %.1f hPa, %d lux, pH %.1f (Layer %d, Seq %d)", 
+                         sensor_msg.data.temp_air, sensor_msg.data.hum_air, sensor_msg.data.pressure_air, 
+                         sensor_msg.data.lux, sensor_msg.data.soil_ph, sensor_msg.header.mesh_layer, sensor_msg.header.sequence_number);
                 
                 // Record when we sent data for timeout tracking
                 data_sent_time = esp_timer_get_time() / 1000000;
@@ -276,9 +293,9 @@ void esp_mesh_p2p_rx_main(void *arg)
             sensor_message_t *sensor_msg = (sensor_message_t*)data.data;
             
             if (sensor_msg->header.message_type == MSG_TYPE_SENSOR_DATA) {
-                ESP_LOGI(MSG_TAG, "📤 Forwarding child sensor data to gateway: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d)", 
-                         sensor_msg->data.temp_air, sensor_msg->data.soil_temp, sensor_msg->data.hum_air, 
-                         sensor_msg->data.lux, sensor_msg->data.soil_ph, sensor_msg->header.mesh_layer);
+                ESP_LOGI(MSG_TAG, "📤 Forwarding child sensor data to gateway: Air %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d)", 
+                         sensor_msg->data.temp_air, sensor_msg->data.hum_air, sensor_msg->data.lux, 
+                         sensor_msg->data.soil_ph, sensor_msg->header.mesh_layer);
                 
                 // Forward the data to the gateway/root using TODS
                 mesh_data_t forward_data = {
@@ -418,6 +435,18 @@ esp_err_t message_handler_init_sensor(void)
     ESP_LOGI(MSG_TAG, "🌱 Initializing agricultural sensor message handler");
     is_running = true;
     sequence_number = 0;
+    
+    // Try to initialize BME280/BME680 sensor - continue gracefully if it fails
+    ESP_LOGI(MSG_TAG, "🔍 Attempting to initialize BME280 sensor...");
+    esp_err_t bme_init_result = bme_sensor_init();
+    if (bme_init_result == ESP_OK) {
+        bme_sensor_type_t sensor_type = bme_sensor_get_type();
+        const char* sensor_name = (sensor_type == BME_TYPE_BME280) ? "BME280" : "Unknown";
+        ESP_LOGI(MSG_TAG, "✅ %s sensor initialized successfully", sensor_name);
+    } else {
+        ESP_LOGI(MSG_TAG, "❌ BME sensor initialization failed: %s - will use null values", esp_err_to_name(bme_init_result));
+    }
+    
     return ESP_OK;
 }
 

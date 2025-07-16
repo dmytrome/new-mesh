@@ -3,6 +3,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <math.h>
 #include "esp_log.h"
 #include "esp_mesh.h"
 #include "esp_mac.h"
@@ -83,40 +84,102 @@ static void create_combined_payload(char *json_buffer, size_t buffer_size) {
         first_sensor = false;
         
         sensor_message_t *msg = &sensor_data[i].data;
+        
+        // Convert sensor data to JSON format (null for NAN values)  
+        char temp_air_str[16], hum_air_str[16], pressure_air_str[16], temp_ground_str[16], soil_temp_str[16], soil_hum_str[16];
+        char soil_ph_str[16], lux_str[16], soil_ec_str[16], soil_n_str[16], soil_p_str[16], soil_k_str[16];
+        char bat_lvl_str[16];
+        
+        // Float values (null if NAN)
+        if (isnan(msg->data.temp_air)) {
+            strcpy(temp_air_str, "null");
+        } else {
+            snprintf(temp_air_str, sizeof(temp_air_str), "%.1f", msg->data.temp_air);
+        }
+        
+        if (isnan(msg->data.hum_air)) {
+            strcpy(hum_air_str, "null");
+        } else {
+            snprintf(hum_air_str, sizeof(hum_air_str), "%.1f", msg->data.hum_air);
+        }
+        
+        if (isnan(msg->data.pressure_air)) {
+            strcpy(pressure_air_str, "null");
+        } else {
+            snprintf(pressure_air_str, sizeof(pressure_air_str), "%.1f", msg->data.pressure_air);
+        }
+        
+        if (isnan(msg->data.temp_ground)) {
+            strcpy(temp_ground_str, "null");
+        } else {
+            snprintf(temp_ground_str, sizeof(temp_ground_str), "%.1f", msg->data.temp_ground);
+        }
+        
+        if (isnan(msg->data.soil_temp)) {
+            strcpy(soil_temp_str, "null");
+        } else {
+            snprintf(soil_temp_str, sizeof(soil_temp_str), "%.1f", msg->data.soil_temp);
+        }
+        
+        if (isnan(msg->data.soil_hum)) {
+            strcpy(soil_hum_str, "null");
+        } else {
+            snprintf(soil_hum_str, sizeof(soil_hum_str), "%.1f", msg->data.soil_hum);
+        }
+        
+        if (isnan(msg->data.soil_ph)) {
+            strcpy(soil_ph_str, "null");
+        } else {
+            snprintf(soil_ph_str, sizeof(soil_ph_str), "%.1f", msg->data.soil_ph);
+        }
+        
+        if (isnan(msg->data.bat_lvl)) {
+            strcpy(bat_lvl_str, "null");
+        } else {
+            snprintf(bat_lvl_str, sizeof(bat_lvl_str), "%.2f", msg->data.bat_lvl);
+        }
+        
+        // Integer values (just output as numbers, they don't have null indicators)
+        snprintf(lux_str, sizeof(lux_str), "%d", msg->data.lux);
+        snprintf(soil_ec_str, sizeof(soil_ec_str), "%d", msg->data.soil_ec);
+        snprintf(soil_n_str, sizeof(soil_n_str), "%d", msg->data.soil_n);
+        snprintf(soil_p_str, sizeof(soil_p_str), "%d", msg->data.soil_p);
+        snprintf(soil_k_str, sizeof(soil_k_str), "%d", msg->data.soil_k);
+        
         offset += snprintf(json_buffer + offset, buffer_size - offset,
             "{\"sensor_id\":\"%s\",\"data\":{"
-            "\"lux\":%d,"
-            "\"temp_air\":%.1f,"
-            "\"hum_air\":%.1f,"
-            "\"temp_ground\":%.1f,"
-            "\"soil_temp\":%.1f,"
-            "\"soil_hum\":%.1f,"
-            "\"soil_ec\":%.2f,"
-            "\"soil_ph\":%.1f,"
-            "\"soil_n\":%.1f,"
-            "\"soil_p\":%.1f,"
-            "\"soil_k\":%.1f,"
-            "\"soil_salinity\":%.2f,"
-            "\"soil_tds_npk\":%.2f,"
-            "\"bat_lvl\":%.1f,"
-            "\"bat_vol\":%.0f"
+            "\"lux\":%s,"
+            "\"temp_air\":%s,"
+            "\"hum_air\":%s,"
+            "\"pressure\":%s,"
+            "\"temp_ground\":%s,"
+            "\"soil_temp\":%s,"
+            "\"soil_hum\":%s,"
+            "\"soil_ec\":%s,"
+            "\"soil_ph\":%s,"
+            "\"soil_n\":%s,"
+            "\"soil_p\":%s,"
+            "\"soil_k\":%s,"
+            "\"soil_salinity\":null,"
+            "\"soil_tds_npk\":null,"
+            "\"bat_lvl\":%s,"
+            "\"bat_vol\":%d"
             "}}",
             sensor_data[i].sensor_id,
-            msg->data.lux,
-            msg->data.temp_air,
-            msg->data.hum_air,
-            msg->data.soil_temp, // temp_ground same as soil_temp
-            msg->data.soil_temp,
-            msg->data.soil_hum,
-            (float)msg->data.soil_ec / 1000.0,
-            msg->data.soil_ph,
-            (float)msg->data.soil_n,
-            (float)msg->data.soil_p,
-            (float)msg->data.soil_k,
-            0.0, // soil_salinity (not available)
-            0.0, // soil_tds_npk (not available)
-            msg->data.bat_lvl,
-            (float)msg->data.bat_vol
+            lux_str,
+            temp_air_str,
+            hum_air_str,
+            pressure_air_str,
+            temp_ground_str,
+            soil_temp_str,
+            soil_hum_str,
+            soil_ec_str,
+            soil_ph_str,
+            soil_n_str,
+            soil_p_str,
+            soil_k_str,
+            bat_lvl_str,
+            msg->data.bat_vol             // mV
         );
     }
     
@@ -140,22 +203,16 @@ static bool should_publish(void) {
     // Get current connected nodes count - for gateway, this includes itself
     int connected_nodes = esp_mesh_get_routing_table_size();
     
-    // Debug information
+    // Minimal debug tracking
     static int last_active_sensors = -1;
-    static int last_connected_nodes = -1;
-    if (active_sensors != last_active_sensors || connected_nodes != last_connected_nodes) {
-        ESP_LOGI(MESH_TAG, "📊 Publish check: %d sensors with data, %d nodes in routing table", 
-                 active_sensors, connected_nodes);
+    if (active_sensors != last_active_sensors) {
         last_active_sensors = active_sensors;
-        last_connected_nodes = connected_nodes;
     }
     
     // For gateway (root), routing table includes itself, so connected_nodes will be at least 1
     // Publish if we have data from sensors AND routing table size is minimal (only gateway/router)
     // In tree topology, routing table size should be close to 1 when all sensors are sleeping
     if (active_sensors >= 1 && connected_nodes <= 1) {
-        ESP_LOGI(MESH_TAG, "📤 Publishing trigger: %d sensors with data, %d nodes in routing table (all sensors disconnected)", 
-                 active_sensors, connected_nodes);
         return true;
     }
     
@@ -185,11 +242,6 @@ void initialize_unified_wake_time(void) {
         // This wake time will be used for ALL sensors to ensure synchronized wake-up
         unified_wake_time = current_time + (sleep_period_minutes * 60);
         wake_time_set = true;
-        
-        ESP_LOGI(MESH_TAG, "🕐 Mesh sleep cycle initialized (coordinated by gateway):");
-        ESP_LOGI(MESH_TAG, "   Current time: %lld", (long long)current_time);
-        ESP_LOGI(MESH_TAG, "   Mesh cycle duration: %d minutes", sleep_period_minutes);
-        ESP_LOGI(MESH_TAG, "   Unified wake time: %lld", (long long)unified_wake_time);
     }
 }
 
@@ -211,20 +263,13 @@ void gateway_enter_deep_sleep(void) {
     int early_wake_seconds = CONFIG_GATEWAY_EARLY_WAKE_SECONDS;
     time_t gateway_wake_time = unified_wake_time - early_wake_seconds;
     uint32_t sleep_duration = calculate_sleep_duration(now, gateway_wake_time);
-    
-    ESP_LOGI(MESH_TAG, "🌙 Gateway entering deep sleep:");
-    ESP_LOGI(MESH_TAG, "   Current time: %lld", (long long)now);
-    ESP_LOGI(MESH_TAG, "   Sensor wake time: %lld", (long long)unified_wake_time);
-    ESP_LOGI(MESH_TAG, "   Gateway wake time: %lld (-%ds early)", (long long)gateway_wake_time, early_wake_seconds);
-    ESP_LOGI(MESH_TAG, "   Sleep duration: %" PRIu32 " seconds", sleep_duration);
-    
+        
     // Enable timer wake-up
     esp_sleep_enable_timer_wakeup(sleep_duration * 1000000ULL);
     
     // Short delay to allow logging
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     
-    ESP_LOGI(MESH_TAG, "💤 Gateway deep sleep started");
     esp_deep_sleep_start();
 }
 
@@ -257,13 +302,7 @@ void esp_mesh_p2p_tx_main(void *arg)
         // Track connected nodes changes
         int current_connected_nodes = esp_mesh_get_routing_table_size();
         if (current_connected_nodes != previous_connected_nodes) {
-            ESP_LOGI(MESH_TAG, "🔄 Connected nodes changed: %d -> %d", previous_connected_nodes, current_connected_nodes);
             previous_connected_nodes = current_connected_nodes;
-        }
-        
-        if (!(send_count % 10)) {
-            ESP_LOGI(MESH_TAG, "🌐 GATEWAY STATUS: Connected sensors:%d/%d, cycle:%d", 
-                     route_table_size, current_connected_nodes, send_count);
         }
         
         // Check if we should publish when sensors disconnect
@@ -276,9 +315,7 @@ void esp_mesh_p2p_tx_main(void *arg)
                 vTaskDelay(30 * 1000 / portTICK_PERIOD_MS);
                 continue;
             }
-            
-            // Wait a moment for MQTT to connect
-            ESP_LOGI(MESH_TAG, "⏳ Waiting for MQTT connection before publishing...");
+
             int mqtt_wait_count = 0;
             while (!mqtt_handler_is_connected() && mqtt_wait_count < 30) { // Wait up to 30 seconds
                 vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -294,13 +331,9 @@ void esp_mesh_p2p_tx_main(void *arg)
             static char combined_json[2048];
             create_combined_payload(combined_json, sizeof(combined_json));
             
-            ESP_LOGI(MESH_TAG, "📤 Publishing combined payload with %d sensors (all sensors disconnected)", sensor_count);
-            ESP_LOGI(MESH_TAG, "📄 JSON: %s", combined_json);
-            
             // Publish to AWS IoT Core via MQTT
             mqtt_err = mqtt_handler_publish_sensor_data("combined_sensors", combined_json);
             if (mqtt_err == ESP_OK) {
-                ESP_LOGI(MESH_TAG, "☁️ Combined data published to AWS IoT Core successfully");
                 last_publish_time = time(NULL);
                 
                 // Mark all sensors as published
@@ -311,18 +344,14 @@ void esp_mesh_p2p_tx_main(void *arg)
                 // Stop MQTT client after publishing
                 extern esp_err_t mqtt_handler_stop(void);
                 mqtt_handler_stop();
-                ESP_LOGI(MESH_TAG, "🛑 MQTT client stopped after publishing");
                 
-                // After publishing, gateway should also go to deep sleep
-                ESP_LOGI(MESH_TAG, "🌙 All sensors sleeping, data published. Gateway preparing for deep sleep...");
+                // Preparing for sleep
                 vTaskDelay(5000 / portTICK_PERIOD_MS); // 5 second delay for cleanup
                 gateway_enter_deep_sleep();
             } else {
                 ESP_LOGW(MESH_TAG, "⚠️ Failed to publish combined data to AWS IoT Core: %s", esp_err_to_name(mqtt_err));
             }
         }
-        
-        // Time coordination is now done dynamically when receiving sensor data
         
         // Remove periodic time sync broadcast - only send time sync to sensors that sent data
         // This is now handled in the RX task when receiving sensor data
@@ -378,40 +407,8 @@ void esp_mesh_p2p_rx_main(void *arg)
                 continue;
             }
             
-            // First, show what we received in the same format as sensor sends
-            ESP_LOGI(MESH_TAG, "📥 RECEIVED agricultural data: Air %.1f°C, Soil %.1f°C, %.1f%% RH, %d lux, pH %.1f (Layer %d, Seq %d)", 
-                     sensor_msg->data.temp_air, sensor_msg->data.soil_temp, sensor_msg->data.hum_air, 
-                     sensor_msg->data.lux, sensor_msg->data.soil_ph,
-                     sensor_msg->header.mesh_layer, sensor_msg->header.sequence_number);
-            
             // Process agricultural sensor data
             if (sensor_msg->header.message_type == MSG_TYPE_SENSOR_DATA) {
-                // Use MAC address directly and make layer prominent
-                ESP_LOGI(MESH_TAG, "🌱 AGRICULTURAL DATA ["MACSTR" L%d]: %.1f°C, %.1f%% RH, %d lux, pH %.1f", 
-                         MAC2STR(sensor_msg->header.node_mac),
-                         sensor_msg->header.mesh_layer,
-                         sensor_msg->data.temp_air, 
-                         sensor_msg->data.hum_air, 
-                         sensor_msg->data.lux, 
-                         sensor_msg->data.soil_ph);
-                         
-                ESP_LOGI(MESH_TAG, "🌱 SOIL DATA ["MACSTR" L%d]: Temp %.1f°C, Hum %.1f%%, EC %d µS/cm, NPK(%d,%d,%d)", 
-                         MAC2STR(sensor_msg->header.node_mac),
-                         sensor_msg->header.mesh_layer,
-                         sensor_msg->data.soil_temp,
-                         sensor_msg->data.soil_hum, 
-                         sensor_msg->data.soil_ec,
-                         sensor_msg->data.soil_n,
-                         sensor_msg->data.soil_p, 
-                         sensor_msg->data.soil_k);
-                         
-                ESP_LOGI(MESH_TAG, "🔋 STATUS ["MACSTR" L%d]: Battery %.2fV (%dmV), Seq %d, Quality %d%%", 
-                         MAC2STR(sensor_msg->header.node_mac),
-                         sensor_msg->header.mesh_layer,
-                         sensor_msg->data.bat_lvl,
-                         sensor_msg->data.bat_vol,
-                         sensor_msg->header.sequence_number,
-                         sensor_msg->data.reading_quality);
                 
                 // Store sensor data for combined payload
                 int sensor_idx = find_sensor_by_mac(sensor_msg->header.node_mac);
@@ -421,13 +418,6 @@ void esp_mesh_p2p_rx_main(void *arg)
                     
                                         // Update last data received time
                     last_data_received_time = time(NULL);
-                    
-                    ESP_LOGI(MESH_TAG, "💾 Stored data for sensor %s (total sensors: %d)", 
-                             sensor_data[sensor_idx].sensor_id, sensor_count);
-                    
-                    // Send time sync immediately after receiving any sensor data (simple approach)
-                    ESP_LOGI(MESH_TAG, "🕐 Sending time sync after receiving data from "MACSTR"", 
-                             MAC2STR(sensor_msg->header.node_mac));
                     
                     // Send time sync to the specific sensor that sent data
                     mesh_addr_t sender_addr;
@@ -500,19 +490,13 @@ void send_time_sync_message(const mesh_addr_t* dest_addr) {
     if (dest_addr == NULL) {
         // Broadcast to all nodes in the mesh network
         err = esp_mesh_send(NULL, &data, MESH_DATA_P2P, NULL, 0);
-        if (err == ESP_OK) {
-            ESP_LOGI(MESH_TAG, "🕐 Broadcast unified time sync (now: %lld, unified wake: %lld, sleep: %" PRIu32 " sec)", 
-                     (long long)now, (long long)unified_wake_time, sleep_duration);
-        } else {
+        if (err != ESP_OK) {
             ESP_LOGW(MESH_TAG, "Failed to broadcast time sync: %s", esp_err_to_name(err));
         }
     } else {
         // Send to specific node
         err = esp_mesh_send(dest_addr, &data, MESH_DATA_P2P, NULL, 0);
-        if (err == ESP_OK) {
-            ESP_LOGI(MESH_TAG, "🕐 Sent unified time sync to "MACSTR" (now: %lld, unified wake: %lld, sleep: %" PRIu32 " sec)", 
-                     MAC2STR(dest_addr->addr), (long long)now, (long long)unified_wake_time, sleep_duration);
-        } else {
+        if (err != ESP_OK) {
             ESP_LOGW(MESH_TAG, "Failed to send time sync to "MACSTR": %s", MAC2STR(dest_addr->addr), esp_err_to_name(err));
         }
     }

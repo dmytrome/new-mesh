@@ -37,6 +37,9 @@ void app_main(void)
     // Initialize mesh network system
     ESP_ERROR_CHECK(mesh_network_init_full_system(false));
     
+    // Initialize sensor-specific components (BME280, etc.)
+    ESP_ERROR_CHECK(message_handler_init_sensor());
+    
     ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%lu, root not fixed<0>(tree), ps:0",
              esp_get_minimum_free_heap_size());
     ESP_LOGI(MESH_TAG, "💡 Hint: To enable ultra-low power mode, trigger a timer wake-up");

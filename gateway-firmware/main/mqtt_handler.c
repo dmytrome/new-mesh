@@ -36,7 +36,6 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
     
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
-            ESP_LOGI(MQTT_TAG, "✅ MQTT Connected to AWS IoT Core");
             mqtt_connected = true;
             reconnect_attempts = 0;
             
@@ -46,26 +45,19 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             break;
             
         case MQTT_EVENT_DISCONNECTED:
-            ESP_LOGI(MQTT_TAG, "❌ MQTT Disconnected from AWS IoT Core");
             mqtt_connected = false;
             break;
             
         case MQTT_EVENT_SUBSCRIBED:
-            ESP_LOGI(MQTT_TAG, "✅ MQTT Subscribed, msg_id=%d", event->msg_id);
             break;
             
         case MQTT_EVENT_UNSUBSCRIBED:
-            ESP_LOGI(MQTT_TAG, "✅ MQTT Unsubscribed, msg_id=%d", event->msg_id);
             break;
             
         case MQTT_EVENT_PUBLISHED:
-            ESP_LOGI(MQTT_TAG, "✅ MQTT Published, msg_id=%d", event->msg_id);
             break;
             
         case MQTT_EVENT_DATA:
-            ESP_LOGI(MQTT_TAG, "📥 MQTT Data received:");
-            ESP_LOGI(MQTT_TAG, "  Topic: %.*s", event->topic_len, event->topic);
-            ESP_LOGI(MQTT_TAG, "  Data: %.*s", event->data_len, event->data);
             break;
             
         case MQTT_EVENT_ERROR:
@@ -74,7 +66,6 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event)
             break;
             
         default:
-            ESP_LOGI(MQTT_TAG, "ℹ️ MQTT Other event id:%d", event->event_id);
             break;
     }
     return ESP_OK;
@@ -122,7 +113,6 @@ static esp_err_t mqtt_app_start(void)
         return err;
     }
 
-    ESP_LOGI(MQTT_TAG, "🚀 MQTT client started");
     return ESP_OK;
 }
 
@@ -136,10 +126,7 @@ esp_err_t mqtt_handler_init(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(MQTT_TAG, "🔧 Initializing MQTT handler for AWS IoT Core");
-    // No need to register an event handler with esp_event_handler_register for MQTT
     mqtt_initialized = true;
-    ESP_LOGI(MQTT_TAG, "✅ MQTT handler initialized");
     return ESP_OK;
 }
 
@@ -155,7 +142,6 @@ esp_err_t mqtt_handler_start(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(MQTT_TAG, "🚀 Starting MQTT client");
     return mqtt_app_start();
 }
 
@@ -166,7 +152,6 @@ esp_err_t mqtt_handler_stop(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(MQTT_TAG, "🛑 Stopping MQTT client");
     esp_err_t err = esp_mqtt_client_stop(mqtt_client);
     if (err != ESP_OK) {
         ESP_LOGE(MQTT_TAG, "❌ Failed to stop MQTT client: %s", esp_err_to_name(err));
@@ -181,7 +166,6 @@ esp_err_t mqtt_handler_stop(void)
 
     mqtt_client = NULL;
     mqtt_connected = false;
-    ESP_LOGI(MQTT_TAG, "✅ MQTT client stopped");
     return ESP_OK;
 }
 
@@ -197,10 +181,7 @@ esp_err_t mqtt_handler_publish_sensor_data(const char* sensor_mac, const char* d
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Send the JSON data directly without wrapper
-    ESP_LOGI(MQTT_TAG, "📤 Publishing sensor data to AWS IoT Core:");
-    ESP_LOGI(MQTT_TAG, "  Topic: %s", TOPIC_METRICS);
-    ESP_LOGI(MQTT_TAG, "  Payload: %s", data);
+    ESP_LOGI(MQTT_TAG, "📤 Publishing to MQTT - MAC: %s, Payload: %s", sensor_mac, data);
 
     int msg_id = esp_mqtt_client_publish(mqtt_client, TOPIC_METRICS, data, strlen(data), 1, 0);
     if (msg_id == -1) {
@@ -208,7 +189,7 @@ esp_err_t mqtt_handler_publish_sensor_data(const char* sensor_mac, const char* d
         return ESP_FAIL;
     }
 
-    ESP_LOGI(MQTT_TAG, "✅ MQTT message published with ID: %d", msg_id);
+    ESP_LOGI(MQTT_TAG, "✅ MQTT message published successfully, msg_id: %d", msg_id);
     return ESP_OK;
 }
 

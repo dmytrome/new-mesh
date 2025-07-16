@@ -193,4 +193,13 @@ menu "Ultra-Low Power Mesh Configuration"
             How often to check if mesh children have disconnected (in seconds).
             Lower values drain battery faster but respond quicker to topology changes.
 
+    config LOCATION_ALTITUDE_METERS
+        int "Location altitude above sea level (meters)"
+        range 0 8848
+        default 29
+        help
+            Your location's altitude above sea level in meters.
+            Used for accurate pressure compensation in BME280 sensor.
+            Set to 0 for sea level, or find your altitude using online tools.
+
 endmenu 

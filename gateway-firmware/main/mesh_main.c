@@ -10,11 +10,6 @@
 #include "mqtt_handler.h"
 
 /*******************************************************
- *                Variable Definitions
- *******************************************************/
-static const char *MESH_TAG = "mesh_main";
-
-/*******************************************************
  *                Main Application Function
  *******************************************************/
 
@@ -27,11 +22,7 @@ void app_main(void)
     
     // Initialize MQTT handler for AWS IoT Core
     ESP_ERROR_CHECK(mqtt_handler_init());
-    
-    ESP_LOGI(MESH_TAG, "=== ✅ Gateway Ready ===");
-    ESP_LOGI(MESH_TAG, "☁️ MQTT client will start after WiFi connection");
-    ESP_LOGI(MESH_TAG, "🕐 SNTP will initialize after WiFi connection");
-    
+  
     /* Keep the gateway running - prevent app_main() from returning */
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));  // Sleep for 1 second

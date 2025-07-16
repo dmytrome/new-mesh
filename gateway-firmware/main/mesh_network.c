@@ -35,7 +35,6 @@ static void initialize_sntp(void) {
         return;
     }
     
-    ESP_LOGI(MESH_TAG, "🕐 Initializing SNTP for time sync");
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_init();
@@ -47,15 +46,9 @@ static void initialize_sntp(void) {
     int retry = 0;
     const int retry_count = 10;
     while (timeinfo.tm_year < (2016 - 1900) && ++retry < retry_count) {
-        ESP_LOGI(MESH_TAG, "🕐 Waiting for system time to be set... (%d/%d)", retry, retry_count);
         vTaskDelay(2000 / portTICK_PERIOD_MS);
         time(&now);
         localtime_r(&now, &timeinfo);
-    }
-    if (timeinfo.tm_year < (2016 - 1900)) {
-        ESP_LOGW(MESH_TAG, "⚠️ System time was not set via NTP. Proceeding anyway.");
-    } else {
-        ESP_LOGI(MESH_TAG, "✅ System time is set: %s", asctime(&timeinfo));
     }
 }
 
@@ -88,12 +81,9 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     switch (event_id) {
     case MESH_EVENT_STARTED: {
         esp_mesh_get_id(&id);
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_MESH_STARTED>ID:"MACSTR"", MAC2STR(id.addr));
         is_mesh_connected = false;
         mesh_layer = esp_mesh_get_layer();
         
-        /* GATEWAY: Immediately become root and create network */
-        ESP_LOGI(MESH_TAG, "GATEWAY: Setting as root and creating network immediately");
         ESP_ERROR_CHECK(esp_mesh_set_type(MESH_ROOT));
         ESP_ERROR_CHECK(esp_mesh_connect());
         
@@ -101,10 +91,10 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
         is_mesh_connected = true;  // Set as connected since we're the root
         extern esp_err_t esp_mesh_comm_p2p_start(void);  // Forward declaration for message handler
         esp_mesh_comm_p2p_start();
-        ESP_LOGI(MESH_TAG, "GATEWAY: P2P communication started as root");
+        // P2P started
         
         // Add a small delay to ensure mesh AP is fully ready before accepting connections
-        ESP_LOGI(MESH_TAG, "⏳ Waiting 2 seconds for mesh AP to be fully ready...");
+        // Waiting for mesh AP
         vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
     break;
@@ -115,17 +105,13 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
     }
     break;
     case MESH_EVENT_CHILD_CONNECTED: {
-        mesh_event_child_connected_t *child_connected = (mesh_event_child_connected_t *)event_data;
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_CONNECTED>aid:%d, "MACSTR"",
-                 child_connected->aid,
-                 MAC2STR(child_connected->mac));
+        // Child connected
+        (void)event_data; // Suppress unused parameter warning
     }
     break;
     case MESH_EVENT_CHILD_DISCONNECTED: {
-        mesh_event_child_disconnected_t *child_disconnected = (mesh_event_child_disconnected_t *)event_data;
-        ESP_LOGI(MESH_TAG, "<MESH_EVENT_CHILD_DISCONNECTED>aid:%d, "MACSTR"",
-                 child_disconnected->aid,
-                 MAC2STR(child_disconnected->mac));
+        // Child disconnected
+        (void)event_data; // Suppress unused parameter warning
     }
     break;
     case MESH_EVENT_ROUTING_TABLE_ADD: {
@@ -279,13 +265,6 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
     
     // Initialize SNTP for time sync after getting IP address
     initialize_sntp();
-    
-    // Time coordination is now done dynamically when receiving sensor data
-    // Each time we receive sensor data, we calculate a fresh wake time = current_time + sleep_period
-    
-    // DON'T start MQTT client immediately - wait until sensors send data and disconnect
-    ESP_LOGI(MESH_TAG, "🕐 Time sync initialized, waiting for sensors to send data before starting MQTT");
-    ESP_LOGI(MESH_TAG, "☁️ MQTT will start when all sensors disconnect and data is ready to publish");
 }
 
 /*******************************************************

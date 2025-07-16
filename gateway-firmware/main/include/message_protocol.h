@@ -40,17 +40,18 @@ typedef struct __attribute__((packed)) {
     uint16_t lux;                    // Light level in lux
     
     // Air measurements  
-    float temp_air;                  // Air temperature (°C)
-    float hum_air;                   // Air humidity (%)
+    float temp_air;                  // Air temperature (°C), NAN = null
+    float hum_air;                   // Air humidity (%), NAN = null
+    float pressure_air;              // Air pressure (hPa, sea level), NAN = null
     
     // Ground temperature
-    float temp_ground;               // Ground temperature (°C)
+    float temp_ground;               // Ground temperature (°C), NAN = null
     
     // Soil measurements
-    float soil_temp;                 // Soil temperature (°C)
-    float soil_hum;                  // Soil humidity (%)
+    float soil_temp;                 // Soil temperature (°C), NAN = null
+    float soil_hum;                  // Soil humidity (%), NAN = null
     uint16_t soil_ec;                // Soil electrical conductivity (µS/cm)
-    float soil_ph;                   // Soil pH level
+    float soil_ph;                   // Soil pH level, NAN = null
     uint16_t soil_n;                 // Soil nitrogen (mg/kg)
     uint16_t soil_p;                 // Soil phosphorus (mg/kg) 
     uint16_t soil_k;                 // Soil potassium (mg/kg)
@@ -58,7 +59,7 @@ typedef struct __attribute__((packed)) {
     uint16_t soil_tds_npk;          // Total dissolved solids NPK (ppm)
     
     // Battery status
-    float bat_lvl;                   // Battery level (V)
+    float bat_lvl;                   // Battery level (V), NAN = null
     uint16_t bat_vol;                // Battery voltage (mV)
     
     // Internal metadata (not in JSON)
